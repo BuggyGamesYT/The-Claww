@@ -20,3 +20,6 @@ status-help.txt
 result
 result-*
 .DS_Store
+android/app/build/
+android/.gradle/
+android/app/src/main/jniLibs/

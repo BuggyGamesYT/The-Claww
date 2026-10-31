@@ -1,0 +1,44 @@
+name: Android APK
+
+on:
+  push:
+    branches: [android-app]
+    paths: ["android/**", "rust/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: android-arm64
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Build claw for arm64 Android
+        working-directory: rust
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          cargo ndk -t arm64-v8a --platform 26 build --release -p rusty-claude-cli
+          mkdir -p ../android/app/src/main/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/claw ../android/app/src/main/jniLibs/arm64-v8a/libclaw.so
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Build APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TheClaww-android-arm64
+          path: android/app/build/outputs/apk/debug/app-debug.apk
