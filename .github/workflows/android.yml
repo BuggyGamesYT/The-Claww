@@ -5,6 +5,13 @@ on:
     branches: [android-app]
     paths: ["android/**", "rust/**", ".github/workflows/android.yml"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the APK to this existing release tag (optional)"
+        required: false
+        default: ""
+  release:
+    types: [published]
 
 env:
   OLLAMA_REF: v0.40.13
@@ -94,6 +101,8 @@ jobs:
   apk:
     needs: [claw, ollama]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -119,3 +128,11 @@ jobs:
         with:
           name: TheClaww-android-arm64
           path: android/app/build/outputs/apk/debug/app-debug.apk
+      - name: Attach APK to release
+        if: github.event_name == 'release' || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk TheClaww.apk
+          gh release upload "$TAG" TheClaww.apk --clobber --repo "$GITHUB_REPOSITORY"
