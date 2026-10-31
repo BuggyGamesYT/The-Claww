@@ -162,13 +162,15 @@ class MainActivity : Activity() {
                 val work = File(filesDir, "ollama").apply { mkdirs() }
                 val payload = File(work, "build/lib/ollama").apply { mkdirs() }
                 // Ollama finds its native runtime at <cwd>/build/lib/ollama.
-                assets.open("ollama_payload.txt").bufferedReader().readLines().filter { it.isNotBlank() }.forEach { p ->
-                    val dest = File(payload, p); dest.parentFile?.mkdirs()
-                    val name = File(p).name
-                    if (name.startsWith("lib") && name.endsWith(".so")) {
-                        dest.delete(); Os.symlink("$lib/$name", dest.absolutePath)
+                // Lines are "path<TAB>libname" for native files shipped in jniLibs, or "path" for assets.
+                // Executables can only run from nativeLibraryDir, so payload entries are symlinks there.
+                assets.open("ollama_payload.txt").bufferedReader().readLines().filter { it.isNotBlank() }.forEach { line ->
+                    val parts = line.split('\t')
+                    val dest = File(payload, parts[0]); dest.parentFile?.mkdirs()
+                    if (parts.size > 1) {
+                        dest.delete(); Os.symlink("$lib/${parts[1]}", dest.absolutePath)
                     } else {
-                        assets.open("ollama/$p").use { i -> dest.outputStream().use { i.copyTo(it) } }
+                        assets.open("ollama/${parts[0]}").use { i -> dest.outputStream().use { i.copyTo(it) } }
                     }
                 }
                 val pb = ProcessBuilder("$lib/libollama.so", "serve").directory(work)

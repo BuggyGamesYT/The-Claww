@@ -37,40 +37,52 @@ jobs:
         with: { repository: ollama/ollama, ref: "${{ env.OLLAMA_REF }}", path: ollama }
       - uses: actions/setup-go@v5
         with: { go-version-file: ollama/go.mod, cache-dependency-path: ollama/go.sum }
-      - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build
-      - name: Build Ollama for arm64 Android (CPU)
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build file
+      - name: Build llama-server for arm64 Android (CPU, static)
         working-directory: ollama
         run: |
           NDK="$ANDROID_NDK_ROOT"
-          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export GOOS=android GOARCH=arm64 CGO_ENABLED=1
-          export CC="$TC/aarch64-linux-android26-clang" CXX="$TC/aarch64-linux-android26-clang++"
-          cmake -B build . -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
-            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF
-          cmake --build build --parallel 4
-          go build -trimpath -ldflags="-s -w" -o ollama-android .
+          cat > /tmp/android-arm64.cmake <<TC
+          set(ANDROID_ABI arm64-v8a)
+          set(ANDROID_PLATFORM android-26)
+          include($NDK/build/cmake/android.toolchain.cmake)
+          TC
+          cmake -S llama/server -B build/ls -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=/tmp/android-arm64.cmake -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/dist" -DOLLAMA_LIB_DIR=lib/ollama -DOLLAMA_RUNNER_DIR= \
+            -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DGGML_CPU_ALL_VARIANTS=OFF \
+            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF \
+            -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16
+          cmake --build build/ls --parallel 4 --target llama-server
+          cmake --install build/ls --component llama-server
+          find dist -type f | sort
+      - name: Build Ollama (Go) for arm64 Android
+        working-directory: ollama
+        run: |
+          TC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
+          CC="$TC/aarch64-linux-android26-clang" CXX="$TC/aarch64-linux-android26-clang++" \
+            go build -trimpath -ldflags="-s -w" -o ollama-android .
           file ollama-android
-          echo "--- payload"; find build/lib/ollama -type f -o -type l | sort || true
       - name: Package
         working-directory: ollama
         run: |
-          mkdir -p ../out/jni ../out/assets/ollama
-          cp ollama-android ../out/jni/libollama.so
-          cp "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" ../out/jni/
-          : > ../out/assets/ollama_payload.txt
-          if [ -d build/lib/ollama ]; then
-            cd build/lib/ollama
-            find . -type f | sed 's#^\./##' | while read -r p; do
-              echo "$p" >> ../../../../out/assets/ollama_payload.txt
-              case "$(basename "$p")" in
-                lib*.so) cp "$p" ../../../../out/jni/ ;;
-                *) mkdir -p "../../../../out/assets/ollama/$(dirname "$p")"; cp "$p" "../../../../out/assets/ollama/$p" ;;
-              esac
-            done
-          fi
-          cat ../../../../out/assets/ollama_payload.txt 2>/dev/null || cat ../out/assets/ollama_payload.txt
+          OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT/jni" "$OUT/assets/ollama"
+          cp ollama-android "$OUT/jni/libollama.so"
+          cp "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$OUT/jni/"
+          : > "$OUT/assets/ollama_payload.txt"
+          cd dist/lib/ollama
+          find . -type f | sed 's#^\./##' | while read -r p; do
+            b="$(basename "$p")"
+            if file "$p" | grep -q ELF; then
+              case "$b" in lib*.so) n="$b" ;; *) n="lib${b}.so" ;; esac
+              cp "$p" "$OUT/jni/$n"; printf '%s\t%s\n' "$p" "$n" >> "$OUT/assets/ollama_payload.txt"
+            else
+              mkdir -p "$OUT/assets/ollama/$(dirname "$p")"; cp "$p" "$OUT/assets/ollama/$p"
+              echo "$p" >> "$OUT/assets/ollama_payload.txt"
+            fi
+          done
+          cat "$OUT/assets/ollama_payload.txt"
       - uses: actions/upload-artifact@v4
         with: { name: ollama-bin, path: out/ }
 
