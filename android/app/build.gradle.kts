@@ -10,7 +10,7 @@ android {
         applicationId = "com.buggygamesyt.theclaww"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
+        versionCode = 2
         versionName = "0.1.9-android"
         ndk { abiFilters += listOf("arm64-v8a") }
     }

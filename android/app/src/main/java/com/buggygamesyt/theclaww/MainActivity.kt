@@ -11,6 +11,7 @@ import android.widget.ImageView
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.system.Os
 import android.text.InputType
@@ -70,7 +71,9 @@ class MainActivity : Activity() {
     private lateinit var chat: LinearLayout
     private lateinit var scroll: ScrollView
     private lateinit var input: EditText
-    private lateinit var sendBtn: TextView
+    private lateinit var sendBtn: FrameLayout
+    private lateinit var sendArrow: TextView
+    private lateinit var stopSquare: View
     private lateinit var statusDot: View
     private lateinit var statusText: TextView
     private lateinit var modelChip: TextView
@@ -128,18 +131,25 @@ class MainActivity : Activity() {
         // Composer
         input = EditText(this).apply {
             hint = "Message claw"; setHintTextColor(muted); setTextColor(fg)
-            background = null; textSize = 16f; maxLines = 6
-            setPadding(dp(18), dp(12), dp(8), dp(12))
+            background = null; textSize = 16f; maxLines = 6; minHeight = dp(44)
+            setPadding(dp(16), dp(10), dp(8), dp(10))
         }
-        sendBtn = TextView(this).apply {
-            text = "↑"; textSize = 20f; gravity = Gravity.CENTER; setTextColor(t.onAccent)
+        sendArrow = TextView(this).apply {
+            text = "↑"; textSize = 26f; gravity = Gravity.CENTER; setTextColor(t.onAccent)
+            typeface = Typeface.DEFAULT_BOLD; setIncludeFontPadding(false)
+        }
+        stopSquare = View(this).apply { background = round(t.onAccent, 4); visibility = View.GONE }
+        sendBtn = FrameLayout(this).apply {
             background = round(accent, 22)
+            addView(sendArrow, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(stopSquare, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
             setOnClickListener { onSend() }
         }
+        // Button sits 4dp from the pill's edge on every side so the circle is concentric with the pill's end.
         val composer = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            background = round(surface, 28)
-            setPadding(0, 0, dp(6), 0)
+            gravity = Gravity.BOTTOM
+            background = round(surface, 26)
+            setPadding(0, dp(4), dp(4), dp(4))
             addView(input, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
             addView(sendBtn, LinearLayout.LayoutParams(dp(44), dp(44)))
         }
@@ -163,8 +173,17 @@ class MainActivity : Activity() {
 
         if (transcript.isNotEmpty()) { transcript.toList().forEach { bubble(it.first, it.second, false) } } else
         bubble("Hi. I'm claw, running right on this tablet with Ollama.\nOpen Settings to download a model, then ask me anything.", false)
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 7)
+        // Keeps the app (and the Ollama/claw processes) alive in the background.
+        try { if (Build.VERSION.SDK_INT >= 26) startForegroundService(Intent(this, ClawService::class.java)) } catch (_: Exception) {}
         if (builtIn) startOllama()
         pollStatus()
+    }
+
+    private fun setBusy(b: Boolean) {
+        sendArrow.visibility = if (b) View.GONE else View.VISIBLE
+        stopSquare.visibility = if (b) View.VISIBLE else View.GONE
     }
 
     private fun chip(label: String, onClick: () -> Unit) = TextView(this).apply {
@@ -218,6 +237,12 @@ class MainActivity : Activity() {
                 env(pb.environment())
                 pb.environment()["OLLAMA_HOST"] = "127.0.0.1:11434"
                 pb.environment()["OLLAMA_MODELS"] = File(filesDir, "models").absolutePath
+                // Performance: faster attention, smaller KV cache, keep the model warm between messages.
+                pb.environment()["OLLAMA_FLASH_ATTENTION"] = "1"
+                pb.environment()["OLLAMA_KV_CACHE_TYPE"] = "q8_0"
+                pb.environment()["OLLAMA_KEEP_ALIVE"] = "30m"
+                pb.environment()["OLLAMA_NUM_PARALLEL"] = "1"
+                pb.environment()["OLLAMA_MAX_LOADED_MODELS"] = "1"
                 ollama = pb.start()
             } catch (e: Exception) {
                 runOnUiThread { bubble("Couldn't start built-in Ollama: ${e.message}", false) }
@@ -282,7 +307,10 @@ class MainActivity : Activity() {
         box.addView(sw)
         box.addView(label("Remote Ollama host (when not on this tablet)")); box.addView(hostF)
         box.addView(label("Model")); box.addView(modelF)
-        box.addView(TextView(this).apply { text = "Small models suit a tablet: llama3.2:1b, qwen2.5-coder:1.5b, gemma3:1b"; setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(10)) })
+        val ramGb = (android.app.ActivityManager.MemoryInfo().also { (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).getMemoryInfo(it) }.totalMem / 1_000_000_000.0)
+        val tip = if (ramGb >= 12) "This device has ${"%.0f".format(ramGb)} GB RAM: it can run 7–8B models like qwen2.5-coder:7b or llama3.1:8b. Small ones (llama3.2:3b) are faster."
+                  else "This device has ${"%.0f".format(ramGb)} GB RAM: best with 1–3B models like llama3.2:3b, qwen2.5-coder:1.5b, gemma3:1b."
+        box.addView(TextView(this).apply { text = tip; setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(10)) })
         box.addView(pull, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)))
         box.addView(progress); box.addView(pullStatus)
         box.addView(label("Installed models")); box.addView(models)
@@ -346,7 +374,7 @@ class MainActivity : Activity() {
         input.setText("")
         bubble(msg, true)
         val out = bubble("…", false)
-        sendBtn.text = "■"
+        setBusy(true)
         val ctx = if (history.length > 8000) history.substring(history.length - 8000) else history.toString()
         val prompt = if (ctx.isBlank()) msg else "Earlier in this conversation:\n$ctx\n\nNew message from the user:\n$msg"
         stopped = false
@@ -394,7 +422,7 @@ class MainActivity : Activity() {
                 val saved = if (stopped) (sb.toString().trim() + "\n\n[Not finished · you stopped this reply]").trim() else sb.toString().trim()
                 if (idx >= 0 && saved.isNotBlank()) transcript[idx] = saved to false
                 history.append("User: ").append(msg).append("\nAssistant: ").append(sb.toString().trim()).append(if (stopped) " [reply cut off by user]" else "").append("\n\n")
-                runOnUiThread { sendBtn.text = "↑" }
+                runOnUiThread { setBusy(false) }
             }
         }
     }
@@ -484,6 +512,6 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        alive = false; claw?.destroy(); if (isFinishing) { ollama?.destroy(); ollama = null }; super.onDestroy()
+        alive = false; claw?.destroy(); if (isFinishing) { ollama?.destroy(); ollama = null; stopService(Intent(this, ClawService::class.java)) }; super.onDestroy()
     }
 }

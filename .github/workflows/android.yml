@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: ollama/go.mod, cache-dependency-path: ollama/go.sum }
       - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build file
-      - name: Build llama-server for arm64 Android (CPU, static)
+      - name: Build llama-server for arm64 Android (CPU variants: armv8.0 .. armv9.2, picked at runtime)
         working-directory: ollama
         run: |
           NDK="$ANDROID_NDK_ROOT"
@@ -50,12 +50,12 @@ jobs:
           cmake -S llama/server -B build/ls -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=/tmp/android-arm64.cmake -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/dist" -DOLLAMA_LIB_DIR=lib/ollama -DOLLAMA_RUNNER_DIR= \
-            -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DGGML_CPU_ALL_VARIANTS=OFF \
-            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF \
-            -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16
-          cmake --build build/ls --parallel 4 --target llama-server
+            -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF
+          cmake --build build/ls --parallel 4
           cmake --install build/ls --component llama-server
           find dist -type f | sort
+          find build/ls -name 'libggml-cpu*.so' | sort
       - name: Build Ollama (Go) for arm64 Android
         working-directory: ollama
         run: |
@@ -71,6 +71,11 @@ jobs:
           cp ollama-android "$OUT/jni/libollama.so"
           cp "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$OUT/jni/"
           : > "$OUT/assets/ollama_payload.txt"
+          # Backend libs (CPU variants) are loaded at runtime, so make sure all of them are in the payload.
+          mkdir -p dist/lib/ollama
+          find build/ls -name 'lib*.so' -type f | while read -r f; do
+            [ -e "dist/lib/ollama/$(basename "$f")" ] || cp "$f" dist/lib/ollama/
+          done
           cd dist/lib/ollama
           find . -type f | sed 's#^\./##' | while read -r p; do
             b="$(basename "$p")"
