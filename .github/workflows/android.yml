@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: ollama/go.mod, cache-dependency-path: ollama/go.sum }
       - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build file
-      - name: Build llama-server for arm64 Android (CPU variants: armv8.0 .. armv9.2, picked at runtime)
+      - name: Build llama-server for arm64 Android (CPU variants armv8.0 to armv9.2, picked at runtime)
         working-directory: ollama
         run: |
           NDK="$ANDROID_NDK_ROOT"
