@@ -240,11 +240,19 @@ class MainActivity : Activity() {
                     connectTimeout = 1500; readTimeout = 1500; responseCode == 200
                 }
             } catch (_: Exception) { false }
+            // Green only when the selected model is actually downloaded.
+            val hasModel = ok && try {
+                val a = JSONObject(URL("$host/api/tags").readText()).getJSONArray("models")
+                val want = if (model.contains(':')) model else "$model:latest"
+                (0 until a.length()).any { a.getJSONObject(it).getString("name") == want }
+            } catch (_: Exception) { false }
+            val amber = Color.rgb(240, 180, 60)
             runOnUiThread {
-                statusDot.background = round(if (ok) good else muted, 5)
+                statusDot.background = round(if (hasModel) good else if (ok) amber else muted, 5)
                 statusText.text = when {
-                    ok && builtIn -> "Ollama running on this tablet"
-                    ok -> "Connected to Ollama"
+                    hasModel && builtIn -> "Ready · $model on this tablet"
+                    hasModel -> "Ready · connected to Ollama"
+                    ok -> "Ollama running · $model not downloaded"
                     builtIn -> "Starting Ollama…"
                     else -> "Can't reach Ollama"
                 }
@@ -326,9 +334,15 @@ class MainActivity : Activity() {
 
     // ---------- Chat via claw ----------
     private fun onSend() {
+        // Stop must work even when the input box is empty.
+        if (claw != null) {
+            stopped = true
+            val p = claw
+            thread { p?.destroy(); Thread.sleep(800); if (p?.isAlive == true) p.destroyForcibly() }
+            return
+        }
         val msg = input.text.toString().trim()
         if (msg.isEmpty()) return
-        if (claw != null) { stopped = true; claw?.destroy(); return }
         input.setText("")
         bubble(msg, true)
         val out = bubble("…", false)
