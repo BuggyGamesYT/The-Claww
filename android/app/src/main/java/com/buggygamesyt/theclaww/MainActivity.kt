@@ -32,7 +32,7 @@ class MainActivity : Activity() {
     private val bg = Color.rgb(14, 14, 16)
     private val surface = Color.rgb(28, 28, 32)
     private val surface2 = Color.rgb(40, 40, 46)
-    private val text = Color.rgb(236, 236, 240)
+    private val fg = Color.rgb(236, 236, 240)
     private val muted = Color.rgb(150, 150, 160)
     private val accent = Color.rgb(255, 122, 69)
     private val good = Color.rgb(80, 200, 120)
@@ -65,7 +65,7 @@ class MainActivity : Activity() {
 
         // Header
         val title = TextView(this).apply {
-            text = "The Claww"; setTextColor(this@MainActivity.text); textSize = 22f
+            text = "The Claww"; setTextColor(fg); textSize = 22f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         }
         statusDot = View(this).apply { background = round(muted, 5) }
@@ -94,7 +94,7 @@ class MainActivity : Activity() {
 
         // Composer
         input = EditText(this).apply {
-            hint = "Message claw"; setHintTextColor(muted); setTextColor(this@MainActivity.text)
+            hint = "Message claw"; setHintTextColor(muted); setTextColor(fg)
             background = null; textSize = 16f; maxLines = 6
             setPadding(dp(18), dp(12), dp(8), dp(12))
         }
@@ -129,7 +129,7 @@ class MainActivity : Activity() {
     }
 
     private fun chip(label: String, onClick: () -> Unit) = TextView(this).apply {
-        text = label; textSize = 13f; setTextColor(text)
+        text = label; textSize = 13f; setTextColor(fg)
         background = round(surface2, 16); setPadding(dp(12), dp(7), dp(12), dp(7))
         setOnClickListener { onClick() }
     }
@@ -138,7 +138,7 @@ class MainActivity : Activity() {
         val tv = TextView(this).apply {
             text = s; textSize = 15.5f; setTextIsSelectable(true)
             setLineSpacing(0f, 1.15f)
-            setTextColor(if (user) Color.BLACK else text)
+            setTextColor(if (user) Color.BLACK else fg)
             background = round(if (user) accent else surface, 18)
             setPadding(dp(14), dp(10), dp(14), dp(10))
             maxWidth = (resources.displayMetrics.widthPixels * 0.8).toInt()
@@ -217,15 +217,15 @@ class MainActivity : Activity() {
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, dp(8)); setBackgroundColor(surface) }
         fun label(s: String) = TextView(this).apply { text = s; setTextColor(muted); textSize = 12f; setPadding(0, dp(14), 0, dp(6)) }
         fun field(v: String, h: String) = EditText(this).apply {
-            setText(v); hint = h; setTextColor(text); setHintTextColor(muted); setSingleLine()
+            setText(v); hint = h; setTextColor(fg); setHintTextColor(muted); setSingleLine()
             background = round(surface2, 12); setPadding(dp(14), dp(10), dp(14), dp(10))
         }
-        val sw = Switch(this).apply { text = "Run Ollama on this tablet"; setTextColor(text); isChecked = builtIn }
+        val sw = Switch(this).apply { text = "Run Ollama on this tablet"; setTextColor(fg); isChecked = builtIn }
         val hostF = field(prefs.getString("host", "")!!, "http://192.168.1.50:11434").apply { inputType = InputType.TYPE_TEXT_VARIATION_URI }
         val modelF = field(model, "llama3.2:1b")
         val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; visibility = View.GONE }
         val pullStatus = TextView(this).apply { setTextColor(muted); textSize = 12f }
-        val models = TextView(this).apply { setTextColor(text); textSize = 13f }
+        val models = TextView(this).apply { setTextColor(fg); textSize = 13f }
         val pull = Button(this).apply {
             text = "Download model"; setTextColor(Color.BLACK); background = round(accent, 12); isAllCaps = false
         }
