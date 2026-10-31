@@ -78,6 +78,7 @@ class MainActivity : Activity() {
     private val history = StringBuilder()
     private val ansi = Regex("\u001B\\[[0-9;?]*[ -/]*[@-~]")
     @Volatile private var alive = true
+    @Volatile private var stopped = false
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
     private fun round(color: Int, r: Int) = GradientDrawable().apply { setColor(color); cornerRadius = dp(r).toFloat() }
@@ -327,13 +328,14 @@ class MainActivity : Activity() {
     private fun onSend() {
         val msg = input.text.toString().trim()
         if (msg.isEmpty()) return
-        if (claw != null) { claw?.destroy(); return }
+        if (claw != null) { stopped = true; claw?.destroy(); return }
         input.setText("")
         bubble(msg, true)
         val out = bubble("…", false)
         sendBtn.text = "■"
         val ctx = if (history.length > 8000) history.substring(history.length - 8000) else history.toString()
         val prompt = if (ctx.isBlank()) msg else "Earlier in this conversation:\n$ctx\n\nNew message from the user:\n$msg"
+        stopped = false
         thread {
             val sb = StringBuilder()
             try {
@@ -354,14 +356,30 @@ class MainActivity : Activity() {
                     }
                 }
                 val code = p.waitFor()
-                if (code != 0 && sb.isBlank()) runOnUiThread { out.text = "claw stopped (code $code). Is a model downloaded?" }
+                if (!stopped && code != 0 && sb.isBlank()) runOnUiThread { out.text = "claw stopped (code $code). Is a model downloaded?" }
             } catch (ex: Exception) {
-                runOnUiThread { out.text = "Error: ${ex.message}" }
+                if (!stopped) runOnUiThread { out.text = "Error: ${ex.message}" }
             } finally {
+                if (stopped) {
+                    val partial = sb.toString().trim()
+                    sb.setLength(0); sb.append(partial)
+                    runOnUiThread {
+                        val note = "Not finished · you stopped this reply"
+                        val body = partial.ifEmpty { "" }
+                        val full = if (body.isEmpty()) note else "$body\n\n$note"
+                        val span = android.text.SpannableString(full)
+                        val start = full.length - note.length
+                        span.setSpan(android.text.style.ForegroundColorSpan(muted), start, full.length, 0)
+                        span.setSpan(android.text.style.StyleSpan(Typeface.ITALIC), start, full.length, 0)
+                        span.setSpan(android.text.style.RelativeSizeSpan(0.85f), start, full.length, 0)
+                        out.text = span
+                    }
+                }
                 claw = null
                 val idx = transcript.indexOfLast { !it.second }
-                if (idx >= 0 && sb.isNotBlank()) transcript[idx] = sb.toString().trim() to false
-                history.append("User: ").append(msg).append("\nAssistant: ").append(sb.toString().trim()).append("\n\n")
+                val saved = if (stopped) (sb.toString().trim() + "\n\n[Not finished · you stopped this reply]").trim() else sb.toString().trim()
+                if (idx >= 0 && saved.isNotBlank()) transcript[idx] = saved to false
+                history.append("User: ").append(msg).append("\nAssistant: ").append(sb.toString().trim()).append(if (stopped) " [reply cut off by user]" else "").append("\n\n")
                 runOnUiThread { sendBtn.text = "↑" }
             }
         }
