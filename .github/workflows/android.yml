@@ -6,8 +6,11 @@ on:
     paths: ["android/**", "rust/**", ".github/workflows/android.yml"]
   workflow_dispatch:
 
+env:
+  OLLAMA_REF: v0.40.13
+
 jobs:
-  apk:
+  claw:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,21 +21,80 @@ jobs:
         with:
           workspaces: rust
           key: android-arm64
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+      - run: cargo install cargo-ndk --locked
       - name: Build claw for arm64 Android
         working-directory: rust
         run: |
           cargo ndk -t arm64-v8a --platform 26 build --release -p rusty-claude-cli
-          mkdir -p ../android/app/src/main/jniLibs/arm64-v8a
-          cp target/aarch64-linux-android/release/claw ../android/app/src/main/jniLibs/arm64-v8a/libclaw.so
+          mkdir -p ../out && cp target/aarch64-linux-android/release/claw ../out/libclaw.so
+      - uses: actions/upload-artifact@v4
+        with: { name: claw-bin, path: out/ }
+
+  ollama:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: ollama/ollama, ref: "${{ env.OLLAMA_REF }}", path: ollama }
+      - uses: actions/setup-go@v5
+        with: { go-version-file: ollama/go.mod, cache-dependency-path: ollama/go.sum }
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build
+      - name: Build Ollama for arm64 Android (CPU)
+        working-directory: ollama
+        run: |
+          NDK="$ANDROID_NDK_ROOT"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export GOOS=android GOARCH=arm64 CGO_ENABLED=1
+          export CC="$TC/aarch64-linux-android26-clang" CXX="$TC/aarch64-linux-android26-clang++"
+          cmake -B build . -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+            -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=OFF
+          cmake --build build --parallel 4
+          go build -trimpath -ldflags="-s -w" -o ollama-android .
+          file ollama-android
+          echo "--- payload"; find build/lib/ollama -type f -o -type l | sort || true
+      - name: Package
+        working-directory: ollama
+        run: |
+          mkdir -p ../out/jni ../out/assets/ollama
+          cp ollama-android ../out/jni/libollama.so
+          cp "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" ../out/jni/
+          : > ../out/assets/ollama_payload.txt
+          if [ -d build/lib/ollama ]; then
+            cd build/lib/ollama
+            find . -type f | sed 's#^\./##' | while read -r p; do
+              echo "$p" >> ../../../../out/assets/ollama_payload.txt
+              case "$(basename "$p")" in
+                lib*.so) cp "$p" ../../../../out/jni/ ;;
+                *) mkdir -p "../../../../out/assets/ollama/$(dirname "$p")"; cp "$p" "../../../../out/assets/ollama/$p" ;;
+              esac
+            done
+          fi
+          cat ../../../../out/assets/ollama_payload.txt 2>/dev/null || cat ../out/assets/ollama_payload.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: ollama-bin, path: out/ }
+
+  apk:
+    needs: [claw, ollama]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: claw-bin, path: dl/claw }
+      - uses: actions/download-artifact@v4
+        with: { name: ollama-bin, path: dl/ollama }
+      - name: Stage native libs and assets
+        run: |
+          J=android/app/src/main/jniLibs/arm64-v8a; A=android/app/src/main/assets
+          mkdir -p $J $A
+          cp dl/claw/libclaw.so $J/
+          cp dl/ollama/jni/* $J/
+          cp -r dl/ollama/assets/* $A/
+          ls -la $J $A
       - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
+        with: { distribution: temurin, java-version: "17" }
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
+        with: { gradle-version: "8.9" }
       - name: Build APK
         working-directory: android
         run: gradle --no-daemon assembleDebug
