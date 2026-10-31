@@ -22,8 +22,6 @@ jobs:
         run: cargo install cargo-ndk --locked
       - name: Build claw for arm64 Android
         working-directory: rust
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: |
           cargo ndk -t arm64-v8a --platform 26 build --release -p rusty-claude-cli
           mkdir -p ../android/app/src/main/jniLibs/arm64-v8a
