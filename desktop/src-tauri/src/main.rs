@@ -381,6 +381,126 @@ fn open_url(url: String) -> Result<(), String> {
     r.map(|_| ()).map_err(|e| e.to_string())
 }
 
+// ---------- Videos the web view can't play: open in the system player, or make a playable copy with ffmpeg ----------
+fn ffmpeg_cmd() -> Command {
+    let mut c = Command::new(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+    c.stdin(Stdio::null());
+    no_window(&mut c);
+    c
+}
+
+#[tauri::command]
+fn ffmpeg_available() -> bool {
+    ffmpeg_cmd().arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Open a saved file (a video, a document) with the app the system uses for it.
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.is_file() { return Err("that file isn't there anymore".into()); }
+    #[cfg(windows)]
+    let r = no_window(Command::new("explorer")).arg(&p).spawn();
+    #[cfg(target_os = "macos")]
+    let r = Command::new("open").arg(&p).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = Command::new("xdg-open").arg(&p).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    r.map(|_| ()).map_err(|e| format!("couldn't open it: {e}"))
+}
+
+/// Cache file for a video, keyed by its path, size and modified time.
+fn video_cache(app: &AppHandle, path: &std::path::Path, suffix: &str) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    if let Ok(m) = std::fs::metadata(path) {
+        m.len().hash(&mut h);
+        if let Ok(t) = m.modified() { t.hash(&mut h); }
+    }
+    let d = app.path().app_cache_dir().unwrap_or_else(|_| data_dir(app).join("cache")).join("video");
+    let _ = std::fs::create_dir_all(&d);
+    d.join(format!("{:016x}{suffix}", h.finish()))
+}
+
+fn ffmpeg_err(out: &std::process::Output) -> String {
+    let err = String::from_utf8_lossy(&out.stderr);
+    let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+    format!("ffmpeg couldn't read this video ({})", if last.is_empty() { format!("exit code {}", out.status.code().unwrap_or(-1)) } else { last })
+}
+
+/// Make (once) an H.264/AAC MP4 copy any web view can play, in the app's cache. Returns its path.
+#[tauri::command]
+async fn video_preview(app: AppHandle, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let src = PathBuf::from(&path);
+        if !src.is_file() { return Err("that video isn't there anymore".into()); }
+        let dest = video_cache(&app, &src, ".mp4");
+        if dest.is_file() && std::fs::metadata(&dest).map(|m| m.len() > 0).unwrap_or(false) { return Ok(dest.to_string_lossy().to_string()); }
+        let part = dest.with_extension("part.mp4");
+        let out = ffmpeg_cmd().arg("-y").arg("-i").arg(&src)
+            .args(["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
+                   "-vf", "scale='min(1920,iw)':-2", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"])
+            .arg(&part).stdout(Stdio::null()).stderr(Stdio::piped()).output()
+            .map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
+        if !out.status.success() { let _ = std::fs::remove_file(&part); return Err(ffmpeg_err(&out)); }
+        std::fs::rename(&part, &dest).map_err(|e| e.to_string())?;
+        Ok(dest.to_string_lossy().to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
+fn video_seconds(src: &std::path::Path) -> f64 {
+    // `ffmpeg -i file` prints "Duration: 00:01:02.34" on stderr.
+    let out = match ffmpeg_cmd().arg("-hide_banner").arg("-i").arg(src).stdout(Stdio::null()).stderr(Stdio::piped()).output() { Ok(o) => o, Err(_) => return 0.0 };
+    let err = String::from_utf8_lossy(&out.stderr);
+    err.split("Duration:").nth(1).and_then(|r| r.split(',').next()).map(|t| {
+        t.trim().split(':').fold(0.0, |acc, part| acc * 60.0 + part.trim().parse::<f64>().unwrap_or(0.0))
+    }).unwrap_or(0.0)
+}
+
+fn ffmpeg_jpeg(src: &std::path::Path, at: f64, max: u32) -> Result<Vec<u8>, String> {
+    let scale = format!("scale='if(gt(iw,ih),min({max},iw),-2)':'if(gt(iw,ih),-2,min({max},ih))'");
+    let out = ffmpeg_cmd().arg("-hide_banner").args(["-ss", &format!("{at:.3}")]).arg("-i").arg(src)
+        .args(["-frames:v", "1", "-vf", &scale, "-q:v", "4", "-f", "image2pipe", "-vcodec", "mjpeg", "-"])
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
+    if !out.status.success() || out.stdout.is_empty() { return Err(ffmpeg_err(&out)); }
+    Ok(out.stdout)
+}
+
+/// `n` evenly spaced frames as base64 JPEGs (longest side `max`), for showing a video to a vision model.
+#[tauri::command]
+async fn video_frames(path: String, n: u32, max: u32) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
+        let src = PathBuf::from(&path);
+        if !src.is_file() { return Err("that video isn't there anymore".into()); }
+        let d = video_seconds(&src);
+        let n = n.clamp(1, 12);
+        let mut frames = Vec::new();
+        let mut last_err = String::new();
+        for k in 1..=n {
+            let at = if d > 0.0 { d * k as f64 / (n as f64 + 1.0) } else { 0.0 };
+            match ffmpeg_jpeg(&src, at, max.clamp(64, 2048)) {
+                Ok(b) => frames.push(base64::engine::general_purpose::STANDARD.encode(b)),
+                Err(e) => last_err = e,
+            }
+            if d <= 0.0 { break; }
+        }
+        if frames.is_empty() { Err(if last_err.is_empty() { "no frames could be read".into() } else { last_err }) } else { Ok(frames) }
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// A still frame (JPEG in the cache) to show for a video the web view can't decode.
+#[tauri::command]
+async fn video_poster(app: AppHandle, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let src = PathBuf::from(&path);
+        let dest = video_cache(&app, &src, ".jpg");
+        if dest.is_file() { return Ok(dest.to_string_lossy().to_string()); }
+        let b = ffmpeg_jpeg(&src, 0.5, 640).or_else(|_| ffmpeg_jpeg(&src, 0.0, 640))?;
+        std::fs::write(&dest, b).map_err(|e| e.to_string())?;
+        Ok(dest.to_string_lossy().to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
 // ---------- Speech to text: whisper.cpp on this PC (bundled whisper-cli + a small English model) ----------
 const WHISPER_MODEL: &str = "ggml-base.en-q5_1.bin";
 const WHISPER_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin";
@@ -481,6 +601,31 @@ fn allow_microphone(app: &tauri::App) {
     }
 }
 
+/// Start at a sane size that always fits the screen: 1100x760, or 90% of the monitor's work area (the part not
+/// covered by the taskbar/panel) when that's smaller, centred. Never starts maximized.
+fn fit_to_screen(app: &tauri::App) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    let mon = w.current_monitor().ok().flatten().or_else(|| w.primary_monitor().ok().flatten())
+        .or_else(|| w.available_monitors().ok().and_then(|v| v.into_iter().next()));
+    if let Some(m) = mon {
+        let area = m.work_area();
+        let sf = m.scale_factor().max(0.5);
+        let (aw, ah) = (area.size.width as f64 / sf, area.size.height as f64 / sf);
+        if aw > 100.0 && ah > 100.0 {
+            let (mut ww, mut wh) = (1100.0_f64, 760.0_f64);
+            if ww > aw * 0.95 { ww = aw * 0.9; }
+            if wh > ah * 0.95 { wh = ah * 0.9; }
+            let _ = w.set_min_size(Some(tauri::LogicalSize::new(360.0_f64.min(ww), 300.0_f64.min(wh))));
+            let _ = w.set_size(tauri::LogicalSize::new(ww, wh));
+            let x = area.position.x + ((area.size.width as f64 - ww * sf) / 2.0).max(0.0) as i32;
+            let y = area.position.y + ((area.size.height as f64 - wh * sf) / 2.0).max(0.0) as i32;
+            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+    }
+    let _ = w.show();
+    let _ = w.set_focus();
+}
+
 fn main() {
     // Keep GPU rendering on by default (forcing DMA-BUF off pushed blur/video onto the CPU and spun fans).
     // `the-claww --safe-render` opts into the slower fallback for GPUs where WebKitGTK shows black or crashes.
@@ -492,11 +637,12 @@ fn main() {
         .manage(Jobs::default())
         .manage(Awake::default())
         .setup(|_app| {
+            fit_to_screen(_app);
             #[cfg(target_os = "linux")]
             allow_microphone(_app);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, keep_awake, github_status, github_set, open_url, whisper_status, whisper_download, transcribe])
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, keep_awake, github_status, github_set, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }

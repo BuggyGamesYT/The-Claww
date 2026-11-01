@@ -1513,6 +1513,15 @@ class MainActivity : Activity() {
                 setOnTouchListener { v, ev -> if (ev.action == android.view.MotionEvent.ACTION_UP) { if (isPlaying) pause() else start(); v.performClick() }; true }
             }
             val wrap = FrameLayout(this).apply { setPadding(dp(8), dp(8), dp(8), 0); addView(vv, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.CENTER)) }
+            // A format this phone can't decode: say so in the viewer (with a still frame when one can be read) instead of a black box.
+            vv.setOnErrorListener { _, _, _ ->
+                wrap.removeAllViews()
+                val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                videoFrames(f.absolutePath, 1).firstOrNull()?.let { b -> col.addView(ImageView(this).apply { adjustViewBounds = true; setImageBitmap(b) }) }
+                col.addView(text("This video's format can't play inside The Claww. Open it from your Files or Gallery app instead.", 13f, muted).apply { setPadding(0, dp(8), 0, 0) })
+                wrap.addView(col, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                true
+            }
             AlertDialog.Builder(this, dialogStyle).setTitle(f.name).setView(wrap).setPositiveButton("Close", null)
                 .setOnDismissListener { vv.stopPlayback() }.show()
         } else android.widget.Toast.makeText(this, "${f.name} · ${f.length() / 1024} KB", android.widget.Toast.LENGTH_SHORT).show()

@@ -12,21 +12,23 @@
       {
         "label": "main",
         "title": "The Claww",
-        "width": 1280,
-        "height": 840,
+        "width": 1100,
+        "height": 760,
         "minWidth": 360,
         "minHeight": 300,
-        "maximized": true,
-        "center": true
+        "visible": false
       }
     ],
     "security": {
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "**"
-        ]
+        "scope": {
+          "allow": [
+            "**"
+          ],
+          "requireLiteralLeadingDot": false
+        }
       }
     }
   },

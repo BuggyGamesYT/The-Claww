@@ -273,6 +273,10 @@ function applyWide() {
 addEventListener("resize", () => applyWide());
 // Never let focus or find-in-page scroll the pager (or a page) sideways: the track's transform alone picks the tab.
 [pager, ...document.querySelectorAll("#track > .page, #app")].forEach(el => el.addEventListener("scroll", () => { if (el.scrollLeft) el.scrollLeft = 0; }));
+// The shell itself never scrolls up/down either (focusing the message box used to scroll #app); only the lists inside do.
+[document.scrollingElement, $("#app"), pager, track, $("#chat"), $("#projects")].forEach(el => el && (el === document.scrollingElement ? addEventListener : el.addEventListener.bind(el))("scroll", () => {
+  if (el.scrollTop) el.scrollTop = 0; if (el.scrollLeft) el.scrollLeft = 0;
+}));
 function go(i, anim = true) {
   tab = Math.max(wide ? 1 : 0, Math.min(2, i)); P.set("tab", tab);
   track.classList.toggle("drag", !anim);
@@ -483,7 +487,7 @@ function openConv(cv) {
 const TEXT_EXT = ["txt", "md", "json", "csv", "kt", "java", "rs", "py", "js", "ts", "html", "css", "xml", "yml", "yaml", "toml", "sh", "c", "cpp", "h", "go", "log", "ini", "cfg", "ps1", "bat"];
 const extOf = n => (n.includes(".") ? n.split(".").pop() : "").toLowerCase();
 const isText = (n, m) => (m || "").startsWith("text/") || /json|xml/.test(m || "") || TEXT_EXT.includes(extOf(n));
-const mimeOf = n => { const e = extOf(n); return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", mkv: "video/x-matroska" })[e] || (TEXT_EXT.includes(e) ? "text/plain" : "application/octet-stream"); };
+const mimeOf = n => { const e = extOf(n); return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", mkv: "video/x-matroska", m4v: "video/mp4", "3gp": "video/3gpp", avi: "video/x-msvideo", ogv: "video/ogg", hevc: "video/mp4" })[e] || (TEXT_EXT.includes(e) ? "text/plain" : "application/octet-stream"); };
 const fileB64 = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
 // Read a saved file back as a same-origin blob URL (canvas can't read asset:// pixels across origins).
 async function blobUrl(a) {
@@ -500,8 +504,8 @@ function imgToJpegB64(src, max = 1024) {
 }
 async function videoFramesB64(src, n = 4, max = 768) {
   const v = h("video"); v.muted = true; v.crossOrigin = "anonymous"; v.preload = "auto"; v.src = src;
-  await new Promise(r => { v.onloadedmetadata = r; v.onerror = r; setTimeout(r, 8000); });
-  const out = []; const d = v.duration || 0; if (!d || !isFinite(d)) return out;
+  const ok = await videoDecodes(v, 8000);
+  const out = []; const d = v.duration || 0; if (!ok || !v.videoWidth || !d || !isFinite(d)) return out;
   for (let k = 1; k <= n; k++) {
     await new Promise(r => { v.onseeked = r; v.currentTime = d * k / (n + 1); setTimeout(r, 4000); });
     const s = Math.min(1, max / Math.max(v.videoWidth, v.videoHeight)); const c = h("canvas"); c.width = v.videoWidth * s; c.height = v.videoHeight * s;
@@ -510,14 +514,96 @@ async function videoFramesB64(src, n = 4, max = 768) {
   }
   return out;
 }
+// ---------- videos ----------
+// Linux (WebKitGTK/GStreamer) can't stream video from the asset:// scheme and shows a black box, so videos play from a
+// blob URL there (like the video wallpaper). Any video the web view still can't decode (unsupported codec, odd file)
+// falls back to a still frame plus "Open in video player", and a playable H.264 copy when ffmpeg is installed.
+const IS_LINUX = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
+// A URL the web view can play the file from (a blob on Linux: revoke it with dropSrc when done).
+function videoSrc(path, mime) {
+  return IS_LINUX ? blobUrl({ path, mime: mime || mimeOf(path) }) : Promise.resolve(fileSrc(path));
+}
+const dropSrc = v => { const u = v.getAttribute("src") || ""; v.pause(); v.removeAttribute("src"); v.load(); if (u.startsWith("blob:")) URL.revokeObjectURL(u.split("#")[0]); };
+let ffmpegOk = null;
+const hasFfmpeg = async () => { if (ffmpegOk === null) { try { ffmpegOk = !!(await invoke("ffmpeg_available")); } catch { ffmpegOk = false; } } return ffmpegOk; };
+// Resolves true once the video has a decoded picture (videoWidth > 0 and a frame loaded), false on error or timeout.
+function videoDecodes(v, ms = 7000) {
+  return new Promise(res => {
+    if (v.readyState >= 2 && v.videoWidth > 0) return res(true);
+    let done = false; const end = ok => { if (done) return; done = true; clearTimeout(t); res(ok); };
+    const t = setTimeout(() => end(v.readyState >= 2 && v.videoWidth > 0), ms);
+    v.addEventListener("loadeddata", () => end(v.videoWidth > 0), { once: true });
+    v.addEventListener("error", () => end(false), { once: true });
+    v.addEventListener("loadedmetadata", () => { if (!v.videoWidth) setTimeout(() => end(v.videoWidth > 0 && v.readyState >= 2), 2500); }, { once: true });
+  });
+}
+const posters = new Map();  // path -> Promise<src|null>
+function videoPoster(a) {
+  if (!posters.has(a.path)) posters.set(a.path, (async () => {
+    // Linux: a still from ffmpeg (when installed) is cheaper than loading the whole file into the page.
+    if (IS_LINUX && await hasFfmpeg()) try { return fileSrc(await invoke("video_poster", { path: a.path })); } catch {}
+    try {
+      const v = h("video", { preload: "auto", playsinline: "" }); v.muted = true; v.src = (await videoSrc(a.path, a.mime)) + "#t=0.5";
+      if (await videoDecodes(v)) {
+        const k = Math.min(1, 320 / Math.max(v.videoWidth, v.videoHeight)), c = h("canvas"); c.width = v.videoWidth * k; c.height = v.videoHeight * k;
+        c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+        try { const d = c.toDataURL("image/jpeg", 0.8); dropSrc(v); return d; }
+        catch { return { video: v.src }; }  // asset:// frames can't be copied to a canvas; show the (decodable) video itself
+      }
+      dropSrc(v);
+    } catch {}
+    if (await hasFfmpeg()) try { return fileSrc(await invoke("video_poster", { path: a.path })); } catch {}
+    return null;
+  })());
+  return posters.get(a.path);
+}
 function thumb(a, small, onRemove) {
   const t = h("div", { class: "thumb" + (small ? " small" : "") });
   if (a.mime.startsWith("image/")) t.append(h("img", { src: fileSrc(a.path) }));
-  else if (a.mime.startsWith("video/")) { const v = h("video", { src: fileSrc(a.path) + "#t=0.5", preload: "metadata" }); v.muted = true; t.append(v, h("div", { class: "play" }, "▶")); }
+  else if (a.mime.startsWith("video/")) {
+    const label = h("div", { class: "ext" }, (extOf(a.name) || "video").toUpperCase().slice(0, 5), h("small", {}, a.name));
+    t.append(label, h("div", { class: "play" }, "▶"));
+    videoPoster(a).then(src => {
+      if (!src) return;
+      if (src.video) { const v = h("video", { src: src.video, preload: "metadata", playsinline: "" }); v.muted = true; label.replaceWith(v); }
+      else label.replaceWith(h("img", { src, alt: a.name }));
+    });
+  }
   else t.append(h("div", { class: "ext" }, (extOf(a.name) || "file").toUpperCase().slice(0, 5), h("small", {}, a.name)));
   if (onRemove) t.append(h("button", { class: "x", onclick: e => { e.stopPropagation(); onRemove(); } }, "×"));
-  else t.onclick = () => { if (a.mime.startsWith("image/")) modal(a.name, h("img", { src: fileSrc(a.path), style: "max-width:100%;border-radius:12px" })); else if (a.mime.startsWith("video/")) modal(a.name, h("video", { src: fileSrc(a.path), controls: "", style: "max-width:100%;border-radius:12px" })); else modal(a.name, h("div", { class: "muted" }, a.path)); };
+  else t.onclick = () => { if (a.mime.startsWith("image/")) modal(a.name, h("img", { src: fileSrc(a.path), style: "max-width:100%;border-radius:12px" })); else if (a.mime.startsWith("video/")) openVideo(a); else modal(a.name, h("div", { class: "muted" }, a.path)); };
   return t;
+}
+function openVideo(a) {
+  const box = h("div", { class: "vidbox" });
+  const note = h("div", { class: "muted", style: "margin-top:8px" });
+  const openBtn = h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("open_path", { path: a.path }).catch(e => { note.textContent = String(e); }) }, "Open in video player");
+  const v = h("video", { controls: "", playsinline: "", preload: "auto", class: "vid" });
+  box.append(v);
+  modal(a.name, h("div", {}, box, note, openBtn), [["Close", () => box.querySelectorAll("video").forEach(dropSrc), true]]);
+  const stopAll = () => { if (!box.isConnected || $("#modal").classList.contains("hidden")) { box.querySelectorAll("video").forEach(dropSrc); return; } setTimeout(stopAll, 1000); };
+  setTimeout(stopAll, 1000);
+  const cantPlay = async () => {
+    dropSrc(v); v.remove();
+    const src = await videoPoster(a);
+    if (src && !src.video) box.prepend(h("img", { src, class: "vid" }));
+    if (await hasFfmpeg()) {
+      note.textContent = "This video's format can't play inside The Claww. Making a playable copy…";
+      try {
+        const prev = await invoke("video_preview", { path: a.path });
+        const pv = h("video", { controls: "", playsinline: "", preload: "auto", class: "vid" });
+        pv.src = await videoSrc(prev, "video/mp4");
+        if (await videoDecodes(pv, 10000)) { box.innerHTML = ""; box.append(pv); note.textContent = "Playing a converted copy."; pv.play().catch(() => {}); return; }
+      } catch (e) { note.textContent = `This video can't play inside The Claww, and a playable copy couldn't be made (${e}). Try opening it in your video player.`; return; }
+    }
+    note.textContent = "This video's format can't play inside The Claww. Open it in your video player instead." +
+      (IS_LINUX ? " To play more formats here, install: sudo pacman -S gst-libav gst-plugins-bad (or install ffmpeg for automatic copies)." : " Installing ffmpeg lets The Claww make a playable copy automatically.");
+  };
+  videoSrc(a.path, a.mime).then(async u => {
+    if (!box.isConnected) { if (u.startsWith("blob:")) URL.revokeObjectURL(u); return; }
+    v.src = u;
+    if (!(await videoDecodes(v))) cantPlay();
+  }).catch(() => cantPlay());
 }
 
 // ---------- chat pane ----------
@@ -809,7 +895,16 @@ function ChatPane(root, projectMode) {
   self.placeholder = input.placeholder;
   // Words from speech go into the box (after anything already typed).
   self.insertText = t => { t = (t || "").trim(); if (!t) return; input.value = (input.value.trim() ? input.value.replace(/\s*$/, " ") : "") + t; input.dispatchEvent(new Event("input")); input.focus(); };
-  input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(160, input.scrollHeight) + "px"; updateBtns(); });
+  // The box grows with what you type up to 40% of the chat's height, then scrolls inside itself (it never makes the window taller).
+  const fitInput = () => {
+    input.style.height = "auto";
+    const cap = Math.max(44, Math.floor((root.clientHeight || innerHeight) * 0.4));
+    const want = input.scrollHeight;
+    input.style.height = Math.min(cap, want) + "px";
+    input.style.overflowY = want > cap ? "auto" : "hidden";
+  };
+  input.addEventListener("input", () => { fitInput(); updateBtns(); });
+  addEventListener("resize", () => { if (input.value) fitInput(); });
   // Up/Down recall your earlier messages in this chat (terminal-style). Only when the caret is on the first/last line, so multi-line editing still works.
   let hist = null, histDraft = "";
   const recall = t => { input.value = t; input.dispatchEvent(new Event("input")); const n = t.length; input.setSelectionRange(n, n); };
@@ -937,9 +1032,17 @@ function ChatPane(root, projectMode) {
         for (const m of prior.slice(-20).reverse()) { if (!m.t) continue; if (histChars + m.t.length > ctx * 0.25 * 3.5) break; histChars += m.t.length; hist.unshift(m); }
         const plan = visionPlan(ctx, visual.filter(a => a.mime.startsWith("image/")).length, visual.filter(a => !a.mime.startsWith("image/")).length, histChars + text.length);
         for (const a of visual) {
-          const url = await blobUrl(a);
-          if (a.mime.startsWith("image/")) { const b = await imgToJpegB64(url, plan.imgMax); if (b) images.push(b); }
-          else { const f = await videoFramesB64(url, plan.frames, plan.vidMax); images.push(...f); notes += `\n(The video "${a.name}" is shown as ${f.length} frames in time order.)`; }
+          if (a.mime.startsWith("image/")) { const url = await blobUrl(a); const b = await imgToJpegB64(url, plan.imgMax); URL.revokeObjectURL(url); if (b) images.push(b); continue; }
+          // Video: decode in the web view; if it can't (format it doesn't support), let ffmpeg pull the frames.
+          let f = [], why = "";
+          try { const url = await blobUrl(a); try { f = await videoFramesB64(url, plan.frames, plan.vidMax); } finally { URL.revokeObjectURL(url); } } catch {}
+          if (!f.length && await hasFfmpeg()) { try { f = await invoke("video_frames", { path: a.path, n: plan.frames, max: plan.vidMax }); } catch (e) { why = String(e); } }
+          if (f.length) { images.push(...f); notes += `\n(The video "${a.name}" is shown as ${f.length} frames in time order.)`; }
+          else {
+            notes += `\n(The user attached a video "${a.name}" but it couldn't be read, so you can't see it. Say so briefly.)`;
+            out.parentNode.insertBefore(h("div", { class: "muted", style: "font-size:12px;margin:0 0 4px 6px" },
+              `Couldn't read frames from ${a.name}: its format isn't supported here` + (why ? ` (${why})` : ". Install ffmpeg so The Claww can read any video.")), out);
+          }
         }
         for (const a of atts.filter(x => !visual.includes(x)))
           notes += isText(a.name, a.mime) ? `\n\nAttached file ${a.name}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 20000 })}\n\`\`\`` : `\n(Also attached: ${a.name}, ${a.mime})`;
