@@ -12,6 +12,12 @@ on:
         default: ""
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: false
+        default: ""
 
 env:
   OLLAMA_REF: v0.40.13

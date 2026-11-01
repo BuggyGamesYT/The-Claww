@@ -1,0 +1,77 @@
+name: Claww release (Android + Windows + Linux)
+
+# One combined release: Android APK, Windows installer, Linux AppImage/.deb (Arch: use the AppImage).
+# Marked Latest so it always sits on top. Started by upstream-sync.yml or by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "Extra release notes"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: claww-release
+  cancel-in-progress: false
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: t
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXTRA: ${{ inputs.notes }}
+        run: |
+          ver=$(jq -r .version desktop/package.json)
+          tag="claww-v${ver}-b${{ github.run_number }}"
+          up=$(git log -1 --format='%h %s' --first-parent origin/main 2>/dev/null || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "## The Claww ${ver}"
+            echo
+            echo "One release for every device. Same app everywhere: Home widgets, Chat, Projects, themes, liquid glass, animated wallpapers, photo/video/file attachments, running on Ollama."
+            echo
+            echo "| Download | For |"
+            echo "|---|---|"
+            echo "| **TheClaww.apk** | Android arm64: Pixel Tablet, Pixel 10 Pro XL and other 64-bit phones/tablets. Ollama runs inside the app. |"
+            echo "| **TheClaww-windows-x64-setup.exe** | Windows 10/11 installer. Install Ollama for Windows first. |"
+            echo "| **TheClaww-linux-x86_64.AppImage** | Arch Linux (and any distro): \`chmod +x\` then run. Needs \`ollama\` (pacman -S ollama). |"
+            echo "| **TheClaww-linux-amd64.deb** | Debian / Ubuntu. |"
+            echo
+            echo "Built from \`android-app\` at ${GITHUB_SHA::7}. Upstream claw-code: ${up}."
+            [ -n "$EXTRA" ] && { echo; echo "$EXTRA"; }
+          } > notes.md
+          gh release create "$tag" --draft --target "$GITHUB_SHA" \
+            --title "The Claww ${ver} · Android, Windows & Arch Linux (build ${{ github.run_number }})" --notes-file notes.md
+
+  android:
+    needs: create
+    uses: ./.github/workflows/android.yml
+    with:
+      release_tag: ${{ needs.create.outputs.tag }}
+    permissions:
+      contents: write
+
+  desktop:
+    needs: create
+    uses: ./.github/workflows/desktop.yml
+    with:
+      release_tag: ${{ needs.create.outputs.tag }}
+    permissions:
+      contents: write
+
+  publish:
+    needs: [create, android, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ needs.create.outputs.tag }}" --draft=false --latest --repo "$GITHUB_REPOSITORY"

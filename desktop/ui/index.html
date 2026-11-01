@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Claww</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="wall"></div>
+<div id="dim"></div>
+<div id="app">
+  <header id="top">
+    <button class="round panel" id="btnSettings" title="Settings">⚙<span class="dot" id="topDot"></span></button>
+    <nav id="tabs" class="panel">
+      <button data-tab="0">Home</button><button data-tab="1">Chat</button><button data-tab="2">Projects</button>
+    </nav>
+    <button class="round panel" id="btnLook" title="Look">◐</button>
+  </header>
+  <main id="pager">
+    <div id="track">
+      <section class="page" id="home"></section>
+      <section class="page" id="chat"></section>
+      <section class="page" id="projects">
+        <div class="layer" id="projList"></div>
+        <div class="layer" id="projDetail"></div>
+        <div class="layer" id="projChat"></div>
+      </section>
+    </div>
+  </main>
+</div>
+<div id="modal" class="hidden"><div id="sheet" class="panel solid"></div></div>
+<script src="app.js"></script>
+</body>
+</html>

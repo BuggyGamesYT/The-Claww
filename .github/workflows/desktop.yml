@@ -1,0 +1,85 @@
+name: Desktop (Windows & Linux)
+
+on:
+  push:
+    branches: [android-app]
+    paths: ["desktop/**", ".github/workflows/desktop.yml"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the builds to this existing release tag (optional)"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  build:
+    name: desktop-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux, os: ubuntu-22.04, bundles: "appimage,deb" }
+          - { name: windows, os: windows-latest, bundles: "nsis" }
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust -> target
+            desktop/src-tauri -> target
+          key: desktop-${{ matrix.name }}
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libfuse2 file
+      - name: Build claw (sidecar)
+        shell: bash
+        working-directory: rust
+        run: |
+          cargo build --release -p rusty-claude-cli
+          TRIPLE=$(rustc -vV | sed -n 's/host: //p')
+          EXT=""; [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
+          mkdir -p ../desktop/src-tauri/binaries
+          cp "target/release/claw$EXT" "../desktop/src-tauri/binaries/claw-$TRIPLE$EXT"
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Build app
+        shell: bash
+        working-directory: desktop
+        run: |
+          npm install --no-audit --no-fund
+          npx tauri icon app-icon.png
+          npx tauri build --bundles ${{ matrix.bundles }}
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p dist
+          B=desktop/src-tauri/target/release/bundle
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp $B/nsis/*.exe dist/TheClaww-windows-x64-setup.exe
+          else
+            cp $B/appimage/*.AppImage dist/TheClaww-linux-x86_64.AppImage
+            cp $B/deb/*.deb dist/TheClaww-linux-amd64.deb
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with: { name: "TheClaww-${{ matrix.name }}", path: dist/ }
+      - name: Attach to release
+        if: inputs.release_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.release_tag }}" dist/* --clobber --repo "$GITHUB_REPOSITORY"
