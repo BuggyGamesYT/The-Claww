@@ -634,7 +634,26 @@ function ChatPane(root, projectMode) {
   root.append(h("div", { class: "pane" }, head, whoRow, list, results, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, sendBtn)), picker)));
   self.input = input;
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(160, input.scrollHeight) + "px"; });
-  input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); self.send(); } });
+  // Up/Down recall your earlier messages in this chat (terminal-style). Only when the caret is on the first/last line, so multi-line editing still works.
+  let hist = null, histDraft = "";
+  const recall = t => { input.value = t; input.dispatchEvent(new Event("input")); const n = t.length; input.setSelectionRange(n, n); };
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); hist = null; self.send(); return; }
+    if ((e.key !== "ArrowUp" && e.key !== "ArrowDown") || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+    const v = input.value, c = input.selectionStart;
+    if (input.selectionEnd !== c) return;
+    const sent = (msgs || []).filter(m => m.u && (m.t || "").trim()).map(m => m.t);
+    if (e.key === "ArrowUp") {
+      if (v.slice(0, c).includes("\n") || !sent.length) return;
+      if (hist === null) { histDraft = v; hist = sent.length; }
+      if (hist === 0) return;
+      e.preventDefault(); hist--; recall(sent[hist]);
+    } else {
+      if (hist === null || v.slice(c).includes("\n")) return;
+      e.preventDefault(); hist++;
+      if (hist >= sent.length) { hist = null; recall(histDraft); } else recall(sent[hist]);
+    }
+  });
   input.addEventListener("paste", e => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); fs.forEach(addFile); } });
   root.addEventListener("dragover", e => e.preventDefault());
   root.addEventListener("drop", e => { e.preventDefault(); [...(e.dataTransfer?.files || [])].forEach(addFile); });
@@ -667,7 +686,7 @@ function ChatPane(root, projectMode) {
   self.open = c => {
     self.conv = c;
     if (searching) closeSearch();
-    conv = c; msgs = Store.msgs(c); pending = []; renderPending(); list.innerHTML = "";
+    conv = c; msgs = Store.msgs(c); hist = null; pending = []; renderPending(); list.innerHTML = "";
     if (!projectMode) P.set("curChat", c.id);
     setTitle();
     if (!msgs.length) bubble(projectMode ? `New chat in ${project()?.name}. I'll keep this project's notes in mind, and files I make go in its folder.`
