@@ -127,7 +127,15 @@ function applyLook() {
   if (GRADIENTS[w]) wall.style.background = `linear-gradient(${GRADIENTS[w][0]}, ${GRADIENTS[w][1]})`;
   else if (ANIMATED()[w]) startAnimated(wall, ...ANIMATED()[w]);
   else if (w === "Your photo" && P.get("wallPath", "")) wall.append(h("img", { src: fileSrc(P.get("wallPath", "")) }));
-  else if (w === "Your video" && P.get("wallVideo", "")) { const v = h("video", { src: fileSrc(P.get("wallVideo", "")), autoplay: "", loop: "", playsinline: "" }); v.muted = true; wall.append(v); }
+  else if (w === "Your video" && P.get("wallVideo", "")) {
+    // Crash guard: if the app died while a video wallpaper was starting, the next launch skips it.
+    if (P.get("videoBoot", 0) >= 2) { P.set("wall", "None"); P.set("videoBoot", 0); setTimeout(() => modal("Video wallpaper turned off", h("div", {}, "The app closed while starting your video wallpaper, so it's been switched off. On Arch, install video codecs with: sudo pacman -S gst-libav gst-plugins-good gst-plugins-bad, then pick the video again in Look.")), 800); return applyLook(); }
+    P.set("videoBoot", P.get("videoBoot", 0) + 1);
+    const v = h("video", { src: fileSrc(P.get("wallVideo", "")), autoplay: "", loop: "", playsinline: "" }); v.muted = true;
+    v.addEventListener("playing", () => setTimeout(() => P.set("videoBoot", 0), 4000), { once: true });
+    v.addEventListener("error", () => { P.set("videoBoot", 0); v.remove(); wall.style.background = "var(--bg)"; }, { once: true });
+    wall.append(v);
+  }
 }
 
 function startAnimated(wall, kind, bg, cols) {
@@ -1062,6 +1070,7 @@ let chatPane, projPane;
 (async () => {
   try { PATHS = await invoke("paths"); PATHS.data = String(PATHS.data).replace(/\\/g, "/"); PATHS.workspace = String(PATHS.workspace).replace(/\\/g, "/"); } catch {}
   try { SYS = await invoke("sys_info"); } catch {}
+  if (PATHS.resetLook) ["wall", "wallPath", "wallVideo", "videoBoot", "blur", "dim", "glass", "glassStyle", "glassBlur", "glassRim"].forEach(k => localStorage.removeItem("claww." + k));
   applyLook();
   $("#btnSettings").onclick = openSettings; $("#btnLook").onclick = openLook; $("#btnModels").onclick = openModels;
   chatPane = ChatPane($("#chat"), false);
@@ -1079,4 +1088,6 @@ let chatPane, projPane;
   pollStatus(); setInterval(pollStatus, 4000);
   checkNewModels(false); setInterval(() => checkNewModels(false), 30 * 60000);
   addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+  // Ctrl+Shift+R: reset wallpaper and glass look (keeps chats and projects).
+  addEventListener("keydown", e => { if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "r") { e.preventDefault(); ["wall", "wallPath", "wallVideo", "videoBoot", "blur", "dim", "glass", "glassStyle", "glassBlur", "glassRim"].forEach(k => localStorage.removeItem("claww." + k)); applyLook(); modal("Look reset", h("div", {}, "Wallpaper and glass are back to defaults. Your chats and projects are untouched.")); } });
 })();

@@ -44,7 +44,7 @@ fn paths(app: AppHandle) -> serde_json::Value {
     let d = data_dir(&app);
     let ws = d.join("workspace");
     let _ = std::fs::create_dir_all(&ws);
-    json!({ "data": d, "workspace": ws, "claw": claw_path(), "clawFound": claw_path().exists() })
+    json!({ "data": d, "workspace": ws, "claw": claw_path(), "clawFound": claw_path().exists(), "resetLook": std::env::args().any(|a| a == "--reset-look") })
 }
 
 #[tauri::command]
@@ -211,6 +211,11 @@ fn start_ollama() -> Result<(), String> {
 }
 
 fn main() {
+    // WebKitGTK's DMA-BUF renderer crashes or blanks on many Arch setups (NVIDIA, some Wayland), especially with video.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     tauri::Builder::default()
         .manage(Jobs::default())
         .manage(Awake::default())
