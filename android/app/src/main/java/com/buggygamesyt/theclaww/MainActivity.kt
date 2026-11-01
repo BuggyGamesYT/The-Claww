@@ -576,6 +576,18 @@ class MainActivity : Activity() {
         @Volatile private var stopped = false
         private var busy = false
 
+        // ---------- Search: icon stretches into a bar. Chat tab = all chats; project chat = this chat only ----------
+        private var headMain: View? = null
+        private val headExtras = mutableListOf<View>()
+        private lateinit var searchBox: LinearLayout
+        private lateinit var searchField: EditText
+        private val searchCount = text("", 12f, muted)
+        private val results = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(4), dp(14), dp(16)) }
+        private val resultsScroll = ScrollView(this@MainActivity).apply { addView(results); visibility = View.GONE }
+        private val bubbleViews = mutableListOf<TextView>()
+        private val saved = HashMap<TextView, CharSequence>()
+        private var hits = listOf<Int>(); private var hitIdx = 0
+        private var searching = false
         init {
             // Sub-header: back (projects) · title + status · history / new
             val head = LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(2), dp(12), dp(6)) }
@@ -650,18 +662,6 @@ class MainActivity : Activity() {
 
         private val project get() = Store.project(conv.project)
 
-        // ---------- Search: icon stretches into a bar. Chat tab = all chats; project chat = this chat only ----------
-        private var headMain: View? = null
-        private val headExtras = mutableListOf<View>()
-        private lateinit var searchBox: LinearLayout
-        private lateinit var searchField: EditText
-        private val searchCount = text("", 12f, muted)
-        private val results = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(4), dp(14), dp(16)) }
-        private val resultsScroll = ScrollView(this@MainActivity).apply { addView(results); visibility = View.GONE }
-        private val bubbleViews = mutableListOf<TextView>()
-        private val saved = HashMap<TextView, CharSequence>()
-        private var hits = listOf<Int>(); private var hitIdx = 0
-        private var searching = false
 
         private fun buildSearchBox(head: LinearLayout) {
             fun iconBtn(kind: String, click: () -> Unit) = FrameLayout(this@MainActivity).apply {
