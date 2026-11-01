@@ -1173,8 +1173,15 @@ class MainActivity : Activity() {
                 if (picked != null) { runModel = picked; if (norm(picked) != norm(model)) usingNote(picked) }
                 else if (adv?.switchTo != null && prefs.getBoolean("autoSwitch", false)) { runModel = adv.switchTo; usingNote(adv.switchTo) }
                 try {
-                    if (visual.isNotEmpty()) visionChat(prior, msg, atts, visual, sb, ::show)
-                    else clawChat(prior, msg, atts, sb, ::show)
+                    // Photos/videos, a model that can't use tools, or Tools switched off for this task: chat with Ollama
+                    // directly. Everything else goes through claw (web search, files, commands).
+                    val noTools = ModelCaps.tools(prefs, host, runModel) == false || !prefs.getBoolean("taskTools_$task", true)
+                    if (visual.isNotEmpty() || noTools) directChat(prior, msg, atts, visual, sb, ::show)
+                    else if (clawChat(prior, msg, atts, sb, ::show) && !stopped) {
+                        // Safety net: the model turned out not to support tools. Remember that and answer directly instead.
+                        ModelCaps.markNoTools(prefs, runModel)
+                        directChat(prior, msg, atts, visual, sb, ::show)
+                    }
                 } catch (ex: Exception) {
                     if (!stopped) { sb.setLength(0); sb.append("Error: ${ex.message}"); show() }
                 } finally {
@@ -1228,7 +1235,8 @@ class MainActivity : Activity() {
                 (if (p.notes.isNotBlank()) "\nProject notes:\n${p.notes}" else "") + "\n\n"
         }
 
-        private fun clawChat(prior: List<Msg>, msg: String, atts: List<Att>, sb: StringBuilder, show: () -> Unit) {
+        /** Runs claw; returns true when the model refused tools ("does not support tools"), so the caller can chat directly. */
+        private fun clawChat(prior: List<Msg>, msg: String, atts: List<Att>, sb: StringBuilder, show: () -> Unit): Boolean {
             val work = workDir()
             val files = StringBuilder()
             atts.forEach { a ->
@@ -1261,19 +1269,25 @@ class MainActivity : Activity() {
                 }
             }
             val code = p.waitFor()
+            if (!stopped && raw.contains("does not support tools", true)) { sb.setLength(0); return true }
             sb.setLength(0)
             if (!stopped) sb.append(ToolSteps.reply(raw.toString().replace(ansi, "")).let { r ->
                 if (r.contains("exceeds the available context size", true)) VisionCtx.friendly(r) ?: r else r })
             if (!stopped && code != 0 && sb.isBlank()) sb.append("claw stopped (code $code). Is a model downloaded?")
             show()
+            return false
         }
 
-        /** Images/videos go straight to Ollama's chat API so a vision model can actually see them. */
-        private fun visionChat(prior: List<Msg>, msg: String, atts: List<Att>, visual: List<Att>, sb: StringBuilder, show: () -> Unit) {
+        /** Direct chat with Ollama's /api/chat, streamed into the bubble: photos/videos (so a vision model can see them),
+         *  models that can't use tools, and tasks with Tools switched off. */
+        private fun directChat(prior: List<Msg>, msg: String, atts: List<Att>, visual: List<Att>, sb: StringBuilder, show: () -> Unit) {
+            sb.setLength(0); sb.append(ToolSteps.LIVE).append("Thinking…"); show()
+            var got = false
             val images = JSONArray()
             var notes = ""
             // Fit every picture and frame in the model's memory (the error was "request exceeds the available context size").
-            val numCtx = VisionCtx.ctx(prefs.getInt("ctxLen", 0), ramBytes() / 1e9)
+            val ctxSet = prefs.getInt("ctxLen", 0)
+            val numCtx = if (visual.isNotEmpty()) VisionCtx.ctx(ctxSet, ramBytes() / 1e9) else if (ctxSet > 0) ctxSet else 4096
             val histMsgs = ArrayList<Msg>(); var histChars = 0
             for (m in prior.takeLast(20).asReversed()) { if (m.text.isBlank()) continue; if (histChars + m.text.length > numCtx * 0.25 * 3.5) break; histChars += m.text.length; histMsgs.add(0, m) }
             val plan = VisionCtx.plan(numCtx, visual.count { it.mime.startsWith("image/") }, visual.count { !it.mime.startsWith("image/") }, histChars + msg.length)
@@ -1291,20 +1305,23 @@ class MainActivity : Activity() {
                          else "\n(Also attached: ${a.name}, ${a.mime})"
             }
             val messages = JSONArray()
-            val pre = projectPreamble()
-            if (pre.isNotEmpty()) messages.put(JSONObject().put("role", "system").put("content", pre.trim()))
+            messages.put(JSONObject().put("role", "system").put("content", (DIRECT_PERSONA + "\n\n" + projectPreamble()).trim()))
             histMsgs.forEach { m -> messages.put(JSONObject().put("role", if (m.user) "user" else "assistant").put("content", m.text)) }
-            messages.put(JSONObject().put("role", "user").put("content", msg.ifEmpty { "What's in this?" } + notes).put("images", images))
+            val um = JSONObject().put("role", "user").put("content", msg.ifEmpty { if (visual.isNotEmpty()) "What's in this?" else "Please look at the attached file(s)." } + notes)
+            if (images.length() > 0) um.put("images", images)
+            messages.put(um)
             val c = URL("$host/api/chat").openConnection() as HttpURLConnection
             cancel = { try { c.disconnect() } catch (_: Exception) {} }
             c.requestMethod = "POST"; c.doOutput = true; c.setRequestProperty("Content-Type", "application/json")
             c.connectTimeout = 5000; c.readTimeout = 600000
-            c.outputStream.use { it.write(JSONObject().put("model", runModel).put("stream", true).put("messages", messages)
-                .put("options", JSONObject().put("num_ctx", numCtx)).toString().toByteArray()) }
+            val req = JSONObject().put("model", runModel).put("stream", true).put("messages", messages)
+            if (visual.isNotEmpty() || ctxSet > 0) req.put("options", JSONObject().put("num_ctx", numCtx))
+            c.outputStream.use { it.write(req.toString().toByteArray()) }
             val stream = if (c.responseCode >= 400) c.errorStream else c.inputStream
             stream.bufferedReader().forEachLine { line ->
                 if (line.isBlank()) return@forEachLine
                 val j = try { JSONObject(line) } catch (_: Exception) { return@forEachLine }
+                if (!got) { got = true; sb.setLength(0) }
                 if (j.has("error")) {
                     val err = j.getString("error")
                     sb.append(VisionCtx.friendly(err) ?: if (err.contains("image", true) || err.contains("vision", true) || err.contains("multimodal", true))
@@ -1313,8 +1330,13 @@ class MainActivity : Activity() {
                 } else sb.append(j.optJSONObject("message")?.optString("content") ?: "")
                 show()
             }
+            if (!got) { sb.setLength(0); show() }
         }
     }
+
+    /** How claw talks when it chats with a model directly (no tools): same voice as the app's claw. */
+    private val DIRECT_PERSONA = "You are claw, a helpful AI assistant running locally on the user's own device through Ollama. Answer clearly and concisely. " +
+        "You can't browse the web, open files or run commands in this chat; if the user asks for that, say so briefly and suggest turning Tools on (or picking a model that supports tools) in Settings › Models for tasks."
 
     // ===================== Speech to text =====================
     private val speech by lazy { Speech(this) }
@@ -1636,6 +1658,10 @@ class MainActivity : Activity() {
                 modelList.addView(LinearLayout(this).apply {
                     gravity = Gravity.CENTER_VERTICAL; background = round(if (on) withAlpha(accent, 70) else surface2, 12); setPadding(dp(14), dp(10), dp(12), dp(10))
                     addView(TextView(this@MainActivity).apply { text = name; setTextColor(fg); textSize = 14f; maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                    if (ModelCaps.noTools(prefs, name)) addView(TextView(this@MainActivity).apply {
+                        text = "no tools"; setTextColor(muted); textSize = 10.5f; setTypeface(typeface, Typeface.BOLD); setPadding(dp(6), dp(1), dp(6), dp(1))
+                        background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setStroke(dp(1), withAlpha(muted, 140)) }
+                    }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
                     addView(TextView(this@MainActivity).apply { text = if (on) "In use" else "Use"; setTextColor(if (on) accent else muted); textSize = 13f; setPadding(dp(10), 0, 0, 0) })
                     setOnClickListener {
                         modelF.setText(name); prefs.edit().putString("model", name).apply()
@@ -1677,26 +1703,43 @@ class MainActivity : Activity() {
             taskRows.removeAllViews()
             listOf("code" to "Coding", "chat" to "General chat", "reason" to "Math", "vision" to "Vision (photos/video)", "write" to "Writing").forEach { (k, l) ->
                 val cur = prefs.getString("taskModel_$k", "") ?: ""
+                // Tools switch: on by default; greyed out when the picked model can't use tools (then it always chats directly).
+                val checkModel = cur.ifEmpty { if (k == "chat") model else "" }
+                val no = checkModel.isNotEmpty() && ModelCaps.noTools(prefs, checkModel)
+                val toolsSw = Switch(this).apply {
+                    text = "Tools"; setTextColor(if (no) withAlpha(muted, 120) else muted); textSize = 12.5f
+                    isChecked = !no && prefs.getBoolean("taskTools_$k", true); isEnabled = !no; alpha = if (no) 0.5f else 1f
+                    setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("taskTools_$k", on).apply() }
+                }
                 taskRows.addView(LinearLayout(this).apply {
                     gravity = Gravity.CENTER_VERTICAL; background = round(surface2, 12); setPadding(dp(14), dp(10), dp(12), dp(10))
                     addView(TextView(this@MainActivity).apply { text = l; setTextColor(fg); textSize = 14f }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                     addView(TextView(this@MainActivity).apply {
-                        text = cur.ifEmpty { "Auto" }; setTextColor(if (cur.isEmpty()) muted else accent); textSize = 13f; maxLines = 1
+                        text = cur.ifEmpty { "Auto" } + (if (cur.isNotEmpty() && ModelCaps.noTools(prefs, cur)) " · no tools" else "")
+                        setTextColor(if (cur.isEmpty()) muted else accent); textSize = 13f; maxLines = 1
                         ellipsize = android.text.TextUtils.TruncateAt.MIDDLE; gravity = Gravity.END
                     }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.2f))
+                    addView(toolsSw, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(10) })
                     setOnClickListener {
                         val names = listOf("Auto") + (allModels ?: emptyList())
+                        val shown = names.mapIndexed { i, n -> if (i > 0 && ModelCaps.noTools(prefs, n)) "$n  · no tools" else n }
                         AlertDialog.Builder(this@MainActivity, dialogStyle).setTitle("Model for ${l.lowercase()}")
-                            .setItems(names.toTypedArray()) { _, i -> prefs.edit().putString("taskModel_$k", if (i == 0) "" else names[i]).apply(); renderTasks() }
+                            .setItems(shown.toTypedArray()) { _, i ->
+                                val pick = if (i == 0) "" else names[i]
+                                prefs.edit().putString("taskModel_$k", pick).apply(); renderTasks()
+                                if (pick.isNotEmpty()) thread { ModelCaps.tools(prefs, host, pick); runOnUiThread { renderTasks() } }
+                            }
                             .setNegativeButton("Cancel", null).show()
                         if (allModels == null) android.widget.Toast.makeText(this@MainActivity, "Ollama isn't reachable yet, so only Auto is listed.", android.widget.Toast.LENGTH_SHORT).show()
                     }
-                }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(6) })
+                }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = if (no) dp(2) else dp(6) })
+                if (no) taskRows.addView(text("This model can't use tools", 11.5f, muted).apply { gravity = Gravity.END; setPadding(0, 0, dp(4), dp(6)) },
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             }
         }
         renderTasks()
         box.addView(taskRows)
-        box.addView(TextView(this).apply { text = "When a message is about one of these, claw uses the model you pick here."; setTextColor(muted); textSize = 12f; setPadding(0, dp(2), 0, dp(10)) })
+        box.addView(TextView(this).apply { text = "When a message is about one of these, claw uses the model you pick here. Tools lets it search the web, read and write files and run commands; with Tools off (or a model that can't use them) it just chats."; setTextColor(muted); textSize = 12f; setPadding(0, dp(2), 0, dp(10)) })
         // Memory (context length) for the built-in Ollama.
         box.addView(label("Memory · how much of the chat and web pages the model can hold"))
         val memOpts = listOf(0 to "Auto", 8192 to "8K", 16384 to "16K", 32768 to "32K", 65536 to "64K", 131072 to "128K")
@@ -1775,6 +1818,8 @@ class MainActivity : Activity() {
                 (0 until a.length()).map { a.getJSONObject(it).getString("name") }.sorted()
             } catch (e: Exception) { null }
             runOnUiThread { allModels = l; renderModels(); renderTasks() }
+            // Learn which models can use tools (cached), then show the "no tools" tags.
+            if (l != null) { ModelCaps.refreshDigests(host, true); l.forEach { ModelCaps.tools(prefs, host, it) }; runOnUiThread { renderModels(); renderTasks() } }
         }
         pull.setOnClickListener {
             save(); progress.visibility = View.VISIBLE; pull.isEnabled = false
