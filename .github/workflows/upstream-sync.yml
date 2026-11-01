@@ -1,0 +1,93 @@
+name: Upstream sync
+
+# Weekly check of ultraworkers/claw-code. When upstream main has commits that
+# aren't in our main, push them to the `upstream-sync/main` branch and open a
+# PR (or refresh the existing one). Nothing is merged automatically.
+
+on:
+  schedule:
+    - cron: '0 13 * * 1'   # Mondays 13:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/ultraworkers/claw-code.git
+  SYNC_BRANCH: upstream-sync/main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        id: fetch
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+          ahead=$(git rev-list --count origin/main..upstream/main)
+          echo "ahead=$ahead" >> "$GITHUB_OUTPUT"
+          echo "Upstream has $ahead commit(s) not in main"
+          git log --oneline --no-merges origin/main..upstream/main | head -50 > /tmp/commits.txt
+          touches_workflows=$(git diff --name-only origin/main...upstream/main -- .github/workflows | wc -l)
+          echo "touches_workflows=$touches_workflows" >> "$GITHUB_OUTPUT"
+
+      - name: Push sync branch
+        id: push
+        if: steps.fetch.outputs.ahead != '0'
+        continue-on-error: true
+        run: git push --force origin "upstream/main:refs/heads/$SYNC_BRANCH"
+
+      - name: Open or update PR
+        if: steps.fetch.outputs.ahead != '0' && steps.push.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Upstream ultraworkers/claw-code has **${{ steps.fetch.outputs.ahead }}** new commit(s)."
+            echo
+            echo "Review for conflicts with local changes (Android app, Arch packaging) before merging."
+            echo
+            echo '```'
+            cat /tmp/commits.txt
+            echo '```'
+          } > /tmp/body.md
+          existing=$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number -q '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body-file /tmp/body.md
+          else
+            gh pr create --draft --base main --head "$SYNC_BRANCH" \
+              --title "Sync upstream claw-code ($(date -u +%F))" --body-file /tmp/body.md
+          fi
+
+      - name: Fall back to an issue
+        # GITHUB_TOKEN can't push upstream edits to .github/workflows, and PR
+        # creation can be disabled in repo settings. Leave a note instead.
+        if: steps.fetch.outputs.ahead != '0' && (steps.push.outcome != 'success' || failure())
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Upstream claw-code has new commits (manual sync needed)"
+          if ! gh issue list --state open --search "$title in:title" --json number -q '.[0].number' | grep -q .; then
+            {
+              echo "Automatic sync couldn't push or open a PR (upstream workflow files changed: ${{ steps.fetch.outputs.touches_workflows }})."
+              echo
+              echo 'Sync manually: `git fetch https://github.com/ultraworkers/claw-code.git main && git merge FETCH_HEAD`'
+              echo
+              echo '```'
+              cat /tmp/commits.txt
+              echo '```'
+            } > /tmp/issue.md
+            gh issue create --title "$title" --body-file /tmp/issue.md
+          fi
