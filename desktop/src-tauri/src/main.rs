@@ -241,48 +241,74 @@ fn sys_info() -> serde_json::Value {
     })
 }
 
-fn spawn_ollama_serve(ctx_len: u32, clear_when_auto: bool) -> Result<(), String> {
+/// Ollama server settings The Claww manages: context length (Memory), and with a Memory budget also how many
+/// models may stay loaded and how long they stay loaded. 0 / empty = not set (Ollama's default).
+#[derive(Clone, Default)]
+struct OllamaEnv { ctx: u32, max_loaded: u32, keep_alive: String }
+
+impl OllamaEnv {
+    fn vars(&self) -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("OLLAMA_CONTEXT_LENGTH", (self.ctx > 0).then(|| self.ctx.to_string())),
+            ("OLLAMA_MAX_LOADED_MODELS", (self.max_loaded > 0).then(|| self.max_loaded.to_string())),
+            ("OLLAMA_KEEP_ALIVE", (!self.keep_alive.trim().is_empty()).then(|| self.keep_alive.trim().to_string())),
+        ]
+    }
+    fn label(&self) -> String {
+        let mut s = format!("Memory set to {}", mem_label(self.ctx));
+        if self.max_loaded > 1 { s += &format!(", up to {} models loaded", self.max_loaded); }
+        if !self.keep_alive.trim().is_empty() { s += &format!(", kept loaded for {}", self.keep_alive.trim()); }
+        s
+    }
+}
+
+fn spawn_ollama_serve(env: &OllamaEnv, clear_unset: bool) -> Result<(), String> {
     let mut c = Command::new("ollama");
     c.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    if ctx_len > 0 { c.env("OLLAMA_CONTEXT_LENGTH", ctx_len.to_string()); } else if clear_when_auto { c.env_remove("OLLAMA_CONTEXT_LENGTH"); }
+    for (k, v) in env.vars() {
+        match v { Some(v) => { c.env(k, v); } None => if clear_unset { c.env_remove(k); } }
+    }
     no_window(&mut c).spawn().map(|_| ()).map_err(|e| format!("couldn't run `ollama serve`: {e}. Is Ollama installed?"))
 }
 
 #[tauri::command]
-fn start_ollama(ctx_len: Option<u32>) -> Result<(), String> {
-    spawn_ollama_serve(ctx_len.unwrap_or(0), false)
+fn start_ollama(ctx_len: Option<u32>, max_loaded: Option<u32>, keep_alive: Option<String>) -> Result<(), String> {
+    spawn_ollama_serve(&OllamaEnv { ctx: ctx_len.unwrap_or(0), max_loaded: max_loaded.unwrap_or(0), keep_alive: keep_alive.unwrap_or_default() }, false)
 }
 
 fn mem_label(n: u32) -> String { if n == 0 { "Auto".into() } else { format!("{}K", n / 1024) } }
 
-/// Memory setting: sets OLLAMA_CONTEXT_LENGTH for this PC's Ollama (0 = Auto, removes it) and restarts Ollama.
+/// Memory setting / Memory budget: sets OLLAMA_CONTEXT_LENGTH (0 = Auto, removes it), and optionally
+/// OLLAMA_MAX_LOADED_MODELS and OLLAMA_KEEP_ALIVE, for this PC's Ollama, then restarts Ollama.
 #[tauri::command]
-async fn set_ollama_memory(ctx_len: u32) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || apply_memory(ctx_len)).await.map_err(|e| e.to_string())?
+async fn set_ollama_memory(ctx_len: u32, max_loaded: Option<u32>, keep_alive: Option<String>) -> Result<String, String> {
+    let env = OllamaEnv { ctx: ctx_len, max_loaded: max_loaded.unwrap_or(0), keep_alive: keep_alive.unwrap_or_default() };
+    tauri::async_runtime::spawn_blocking(move || apply_memory(env)).await.map_err(|e| e.to_string())?
 }
 
 #[allow(unreachable_code)]
-fn apply_memory(n: u32) -> Result<String, String> {
-    let done = || format!("Memory set to {}. Ollama restarted.", mem_label(n));
+fn apply_memory(env: OllamaEnv) -> Result<String, String> {
+    let done = || format!("{}. Ollama restarted.", env.label());
     #[cfg(target_os = "linux")]
     {
         let has_unit = Command::new("systemctl").args(["list-unit-files", "ollama.service", "--no-legend"]).output()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("ollama.service")).unwrap_or(false);
         if !has_unit {
-            // No Ollama system service: restart a user-run `ollama serve` with the new setting.
+            // No Ollama system service: restart a user-run `ollama serve` with the new settings.
             let _ = Command::new("pkill").args(["-x", "ollama"]).status();
             std::thread::sleep(std::time::Duration::from_millis(900));
-            spawn_ollama_serve(n, true)?;
-            return Ok(format!("Memory set to {}. No Ollama system service was found, so The Claww restarted `ollama serve` with it.", mem_label(n)));
+            spawn_ollama_serve(&env, true)?;
+            return Ok(format!("{}. No Ollama system service was found, so The Claww restarted `ollama serve` with it.", env.label()));
         }
         let dir = "/etc/systemd/system/ollama.service.d";
-        let script = if n > 0 {
-            format!("mkdir -p {dir} && printf '[Service]\\nEnvironment=\"OLLAMA_CONTEXT_LENGTH={n}\"\\n' > {dir}/claww-memory.conf && systemctl daemon-reload && systemctl restart ollama")
+        let lines: String = env.vars().into_iter().filter_map(|(k, v)| v.map(|v| format!("Environment=\"{k}={v}\"\\n"))).collect();
+        let script = if !lines.is_empty() {
+            format!("mkdir -p {dir} && printf '[Service]\\n{lines}' > {dir}/claww-memory.conf && systemctl daemon-reload && systemctl restart ollama")
         } else {
             format!("rm -f {dir}/claww-memory.conf && systemctl daemon-reload && systemctl restart ollama")
         };
         let out = Command::new("pkexec").args(["sh", "-c", &script]).output()
-            .map_err(|e| format!("couldn't run pkexec ({e}). Install polkit, or add Environment=\"OLLAMA_CONTEXT_LENGTH={n}\" to the ollama service yourself."))?;
+            .map_err(|e| format!("couldn't run pkexec ({e}). Install polkit, or add the Environment= lines to the ollama service yourself."))?;
         return match out.status.code() {
             Some(0) => Ok(done()),
             Some(126) | Some(127) => Err("the password prompt was cancelled or not allowed, so nothing changed.".into()),
@@ -294,16 +320,20 @@ fn apply_memory(n: u32) -> Result<String, String> {
     }
     #[cfg(windows)]
     {
-        let v = n.to_string();
-        if n > 0 {
-            let ok = no_window(Command::new("setx").args(["OLLAMA_CONTEXT_LENGTH", v.as_str()])).stdout(Stdio::null()).stderr(Stdio::null())
-                .status().map(|s| s.success()).unwrap_or(false);
-            if !ok { return Err("couldn't save OLLAMA_CONTEXT_LENGTH (setx failed).".into()); }
-            std::env::set_var("OLLAMA_CONTEXT_LENGTH", &v);
-        } else {
-            // Auto: remove the user variable (fine if it was never set).
-            let _ = no_window(Command::new("reg").args(["delete", "HKCU\\Environment", "/v", "OLLAMA_CONTEXT_LENGTH", "/f"])).stdout(Stdio::null()).stderr(Stdio::null()).status();
-            std::env::remove_var("OLLAMA_CONTEXT_LENGTH");
+        for (k, v) in env.vars() {
+            match v {
+                Some(v) => {
+                    let ok = no_window(Command::new("setx").args([k, v.as_str()])).stdout(Stdio::null()).stderr(Stdio::null())
+                        .status().map(|s| s.success()).unwrap_or(false);
+                    if !ok { return Err(format!("couldn't save {k} (setx failed).")); }
+                    std::env::set_var(k, &v);
+                }
+                None => {
+                    // Not set: remove the user variable (fine if it was never set).
+                    let _ = no_window(Command::new("reg").args(["delete", "HKCU\\Environment", "/v", k, "/f"])).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                    std::env::remove_var(k);
+                }
+            }
         }
         for im in ["ollama app.exe", "ollama.exe"] {
             let _ = no_window(Command::new("taskkill").args(["/F", "/IM", im])).stdout(Stdio::null()).stderr(Stdio::null()).status();
@@ -311,17 +341,62 @@ fn apply_memory(n: u32) -> Result<String, String> {
         std::thread::sleep(std::time::Duration::from_millis(1200));
         let app = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Programs").join("Ollama").join("ollama app.exe"));
         if let Some(app) = app.filter(|p| p.exists()) {
-            // Started from here, Ollama inherits this process's environment, so pass the new value directly.
+            // Started from here, Ollama inherits this process's environment, so pass the new values directly.
             let mut c = Command::new(app);
-            if n > 0 { c.env("OLLAMA_CONTEXT_LENGTH", &v); } else { c.env_remove("OLLAMA_CONTEXT_LENGTH"); }
+            for (k, v) in env.vars() { match v { Some(v) => { c.env(k, v); } None => { c.env_remove(k); } } }
             c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("saved, but couldn't restart Ollama: {e}"))?;
         } else {
-            spawn_ollama_serve(n, true).map_err(|e| format!("saved, but {e}"))?;
+            spawn_ollama_serve(&env, true).map_err(|e| format!("saved, but {e}"))?;
         }
         return Ok(done());
     }
     let _ = &done;
     Err("The Memory setting works on Windows and Linux.".into())
+}
+
+/// Graphics memory (VRAM) in bytes and the GPU's name, when it can be found: nvidia-smi, rocm-smi, or AMD's sysfs on Linux.
+#[tauri::command]
+async fn gpu_info() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(|| {
+        let run = |cmd: &str, args: &[&str]| -> Option<String> {
+            let mut c = Command::new(cmd);
+            c.args(args).stdin(Stdio::null()).stderr(Stdio::null());
+            let o = no_window(&mut c).output().ok()?;
+            o.status.success().then(|| String::from_utf8_lossy(&o.stdout).to_string())
+        };
+        // NVIDIA: "8192, NVIDIA GeForce RTX 4060" per GPU (MiB).
+        if let Some(out) = run("nvidia-smi", &["--query-gpu=memory.total,name", "--format=csv,noheader,nounits"]) {
+            let mut total = 0u64; let mut name = String::new();
+            for l in out.lines() {
+                let mut it = l.splitn(2, ',');
+                if let Some(mb) = it.next().and_then(|x| x.trim().parse::<u64>().ok()) { total += mb * 1024 * 1024; }
+                if name.is_empty() { name = it.next().unwrap_or("").trim().to_string(); }
+            }
+            if total > 0 { return json!({ "vram": total, "name": name, "source": "nvidia-smi" }); }
+        }
+        // AMD ROCm: CSV with "VRAM Total Memory (B)".
+        if let Some(out) = run("rocm-smi", &["--showmeminfo", "vram", "--csv"]) {
+            let mut lines = out.lines().filter(|l| !l.trim().is_empty());
+            if let Some(head) = lines.next() {
+                let idx = head.split(',').position(|h| h.contains("Total Memory"));
+                let total: u64 = lines.filter_map(|l| idx.and_then(|i| l.split(',').nth(i)).and_then(|v| v.trim().parse::<u64>().ok())).sum();
+                if total > 0 { return json!({ "vram": total, "name": "AMD GPU", "source": "rocm-smi" }); }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut best = 0u64;
+            if let Ok(rd) = std::fs::read_dir("/sys/class/drm") {
+                for e in rd.flatten() {
+                    let p = e.path().join("device").join("mem_info_vram_total");
+                    if let Ok(t) = std::fs::read_to_string(&p) { if let Ok(v) = t.trim().parse::<u64>() { best = best.max(v); } }
+                }
+            }
+            // Integrated GPUs report a small carve-out (e.g. 512 MB); only count a real graphics card.
+            if best >= 1 << 31 { return json!({ "vram": best, "name": "GPU", "source": "sysfs" }); }
+        }
+        json!({ "vram": 0, "name": "", "source": "" })
+    }).await.unwrap_or_else(|_| json!({ "vram": 0 }))
 }
 
 // ---------- GitHub: token kept privately, GitHub's MCP server added to claw's settings ----------
@@ -655,7 +730,7 @@ fn main() {
             allow_microphone(_app);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, keep_awake, github_status, github_set, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, gpu_info, keep_awake, github_status, github_set, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }

@@ -737,13 +737,13 @@ async function installedModels() { try { return (JSON.parse(await invoke("http_g
 // ---------- What each model can do (Ollama /api/show "capabilities"), cached per model + digest ----------
 // claw always sends tool definitions, so a model without "tools" (e.g. gemma3) gets a direct Ollama chat instead.
 const Caps = {
-  cache: P.get("modelCaps", {}),   // normName -> {digest, tools, vision}
-  digests: {}, at: 0,
+  cache: P.get("modelCaps", {}),   // normName -> {v, digest, tools, vision, kvTok, maxCtx}
+  digests: {}, sizes: {}, at: 0,
   async refreshDigests(force) {
     if (!force && Date.now() - this.at < 15000) return;
-    try { (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).forEach(m => this.digests[normName(m.name)] = m.digest || ""); this.at = Date.now(); } catch {}
+    try { (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).forEach(m => { this.digests[normName(m.name)] = m.digest || ""; this.sizes[normName(m.name)] = m.size || 0; }); this.at = Date.now(); } catch {}
   },
-  known(name) { const c = this.cache[normName(name)]; return c && (this.digests[normName(name)] === undefined || c.digest === this.digests[normName(name)]) ? c : null; },
+  known(name) { const c = this.cache[normName(name)]; return c && c.v === 2 && (this.digests[normName(name)] === undefined || c.digest === this.digests[normName(name)]) ? c : null; },
   async get(name) {
     if (!name) return null;
     await this.refreshDigests();
@@ -752,19 +752,89 @@ const Caps = {
       const j = JSON.parse(await invoke("http_post", { url: S.host + "/api/show", body: JSON.stringify({ model: name }), timeoutMs: 6000 }));
       const caps = Array.isArray(j.capabilities) ? j.capabilities : null;
       // Older Ollama has no capabilities list: assume tools work (the error fallback still catches it).
-      const c = { digest: this.digests[k] || "", tools: caps ? caps.includes("tools") : true, vision: caps ? caps.includes("vision") : null };
+      const c = { v: 2, digest: this.digests[k] || "", tools: caps ? caps.includes("tools") : true, vision: caps ? caps.includes("vision") : null, ...kvInfo(j.model_info || {}) };
       this.cache[k] = c; P.set("modelCaps", this.cache); return c;
     } catch { return null; }
   },
-  markNoTools(name) { const k = normName(name); this.cache[k] = { ...(this.cache[k] || { digest: this.digests[k] || "" }), tools: false }; P.set("modelCaps", this.cache); },
+  markNoTools(name) { const k = normName(name); this.cache[k] = { ...(this.cache[k] || { v: 2, digest: this.digests[k] || "" }), tools: false }; P.set("modelCaps", this.cache); },
   noTools(name) { const c = this.known(name); return !!(c && c.tools === false); },
 };
+// KV-cache bytes per token of context, from /api/show model_info: 2 (K and V) x layers x KV heads x head size x 2 bytes (f16 cache).
+function kvInfo(mi) {
+  const arch = mi["general.architecture"] || "", g = k => mi[`${arch}.${k}`];
+  const num = v => Array.isArray(v) ? Math.max(0, ...v.map(Number).filter(isFinite)) : Number(v) || 0;
+  const layers = num(g("block_count")), heads = num(g("attention.head_count")), kv = num(g("attention.head_count_kv")) || heads, emb = num(g("embedding_length"));
+  const kl = num(g("attention.key_length")) || (heads ? emb / heads : 0), vl = num(g("attention.value_length")) || kl;
+  const kvTok = layers && kv && kl ? layers * kv * (kl + vl) * 2 : 0;
+  return { kvTok, maxCtx: num(g("context_length")) || 0 };
+}
+
+// ---------- Memory budget: "Use up to N GB" -> the biggest context that fits next to the model's weights ----------
+const CTX_STEPS = [4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144];
+const Budget = {
+  gb() { return P.get("budgetGB", 0) || 0; },   // 0 = off
+  on() { return this.gb() > 0; },
+  // {ctx, bytes, tooBig} for a model, or null while its size/shape isn't known yet. Too big is only a warning:
+  // the model still runs, with the minimum sensible context (4K), and Ollama loads what it can.
+  plan(name, gb = this.gb()) {
+    if (!gb || !name) return null;
+    const c = Caps.known(name), size = Caps.sizes[normName(name)];
+    if (!c || !c.kvTok || !size) return null;
+    const overhead = 0.8e9 + size * 0.05, avail = gb * 1e9 - size - overhead;
+    let ctx = Math.floor(avail / c.kvTok);
+    if (c.maxCtx) ctx = Math.min(ctx, c.maxCtx);
+    if (ctx < 4096) return { ctx: 4096, bytes: size + overhead + 4096 * c.kvTok, tooBig: true };
+    ctx = CTX_STEPS.filter(x => x <= ctx).pop() || 4096;
+    return { ctx, bytes: size + overhead + ctx * c.kvTok, tooBig: false };
+  },
+  tooBig(name) { const p = this.plan(name); return !!(p && p.tooBig); },
+  ctxFor(name) { const p = this.plan(name); return p ? p.ctx : (P.get("budgetCtx", 0) || 0); },
+};
+// Settings this app gives the local Ollama server (context length; with a budget also loaded-models and keep-alive).
+function ollamaEnv() {
+  if (!Budget.on()) return { ctxLen: P.get("ctxLen", 0) };
+  return { ctxLen: P.get("budgetCtx", 0) || P.get("ctxLen", 0), maxLoaded: P.get("budgetMaxLoaded", 1), keepAlive: "30m" };
+}
+
 // The "Tools" switch per task row in Settings (default on). Off = always the direct chat for that task.
 const taskTools = task => (P.get("taskTools", {}) || {})[task] !== false;
 function setTaskTools(task, on) { const m = P.get("taskTools", {}) || {}; if (on) delete m[task]; else m[task] = false; P.set("taskTools", m); }
 
 // How claw talks when it chats with a model directly (no tools): same voice as the app's claw.
 const DIRECT_PERSONA = "You are claw, a helpful AI assistant running locally on the user's own computer through Ollama. Answer clearly and concisely. You can't browse the web, open files or run commands in this chat; if the user asks for that, say so briefly and suggest turning Tools on (or picking a model that supports tools) in Settings › Models for tasks.";
+
+const PLAIN_WORDS = "Answer the user's last message in plain words. Do not output JSON, function calls or tool calls.";
+const TOOLCALL_NOTE = m => `${m} answered with a tool request instead of words, so there's nothing to show. Try asking again, or pick another model for this kind of task in Settings › Models for tasks.`;
+// Error replies (Ollama/claw/API errors) aren't conversation: keep them, and the message that caused them, out of the history sent to the model.
+const ERR_RE = /^(error:|ollama error:|couldn't reach ollama|claw stopped \(code)|api returned \d{3}|invalid_request_error|does not support tools|that was more than the model can hold/i;
+const isErrorText = t => { t = String(t || "").trim(); return ERR_RE.test(t) || /\bapi returned \d{3} [A-Z]|invalid_request_error|does not support tools/.test(t.slice(0, 400)); };
+function cleanHistory(prior) {
+  const out = [];
+  for (let i = 0; i < prior.length; i++) {
+    const m = prior[i], next = prior[i + 1];
+    if (!m.u && (m.e || isErrorText(m.t))) continue;
+    if (m.u && next && !next.u && (next.e || isErrorText(next.t))) continue;
+    out.push(m);
+  }
+  return out;
+}
+// A reply that is (almost) only a JSON tool call, e.g. {"name": "ToolSearch", "parameters": {...}}, that nothing ran.
+function isToolCallText(t) {
+  t = String(t || "").trim(); if (!t || t.length > 4000) return false;
+  let rest = t.replace(/```(?:json)?/gi, ""), found = false;
+  for (let i = rest.indexOf("{"); i >= 0; i = rest.indexOf("{", i + 1)) {
+    let depth = 0, j = i, str = false;
+    for (; j < rest.length; j++) { const ch = rest[j]; if (str) { if (ch === "\\") j++; else if (ch === '"') str = false; continue; } if (ch === '"') str = true; else if (ch === "{") depth++; else if (ch === "}" && --depth === 0) break; }
+    if (depth !== 0) break;
+    try {
+      const o = JSON.parse(rest.slice(i, j + 1)), call = o && (o.function || o);
+      if (call && typeof call.name === "string" && (typeof call.parameters === "object" || typeof call.arguments === "object" || typeof call.arguments === "string")) {
+        rest = rest.slice(0, i) + rest.slice(j + 1); found = true; i = -1; continue;
+      }
+    } catch {}
+  }
+  return found && rest.replace(/[\s\[\],]/g, "").length < 300;
+}
 
 // ---------- Speech to text: record in the window, transcribe on this PC with whisper.cpp ----------
 const Speech = {
@@ -863,7 +933,7 @@ function ChatPane(root, projectMode) {
   sBox.firstChild.innerHTML = SEARCH;
   const head = h("div", { class: "pane-head" },
     projectMode ? h("button", { class: "back", onclick: () => openProject ? showProjectDetail(openProject) : showProjectList() }, "‹") : null,
-    h("div", { class: "grow" }, title, h("div", { class: "status", onclick: () => status.ok ? openSettings() : invoke("start_ollama", { ctxLen: P.get("ctxLen", 0) }).then(() => setTimeout(pollStatus, 1500)).catch(e => modal("Ollama", h("div", {}, String(e)))) }, dot, stxt)),
+    h("div", { class: "grow" }, title, h("div", { class: "status", onclick: () => status.ok ? openSettings() : invoke("start_ollama", ollamaEnv()).then(() => setTimeout(pollStatus, 1500)).catch(e => modal("Ollama", h("div", {}, String(e)))) }, dot, stxt)),
     sBox,
     projectMode ? null : h("button", { class: "chip", onclick: showHistory }, "Chats"),
     h("button", { class: "chip", onclick: () => { if (!busy) self.open(Store.newConv(projectMode ? conv.project : null)); } }, "New"));
@@ -1012,6 +1082,7 @@ function ChatPane(root, projectMode) {
       [["Delete current", () => { if (!busy && Store.convs.find(x => x.id === conv.id)) confirmDelete(conv, () => self.open(Store.newConv(null))); return false; }], ["Close", null, true]]);
   }
   const context = prior => {
+    prior = cleanHistory(prior);
     let s = prior.map(m => (m.u ? "User: " : "Assistant: ") + m.t + (m.a?.length ? ` [attached: ${m.a.map(a => a.name).join(", ")}]` : "") + (m.s ? " [reply cut off by user]" : "")).join("\n");
     return s.length > 8000 ? s.slice(-8000) : s;
   };
@@ -1070,13 +1141,14 @@ function ChatPane(root, projectMode) {
     const noTools = (caps && caps.tools === false) || !taskTools(task);
     const thinking = () => { acc = "Thinking…"; show(); out.classList.add("thinking"); };
     // Direct chat with Ollama /api/chat, streamed into the bubble.
-    const runDirect = async () => {
-      job = uid();
+    const runDirect = async (o = {}) => {
+      job = uid(); am.e = false;
       thinking(); let got = false;
-      const ctxSet = P.get("ctxLen", 0);
-      const ctx = visual.length ? visionCtx() : (ctxSet || 4096);
+      const bud = Budget.on() ? (await Caps.get(runModel), Budget.ctxFor(runModel)) : 0;
+      const ctxSet = bud || P.get("ctxLen", 0);
+      const ctx = bud || (visual.length ? visionCtx() : (ctxSet || 4096));
       const hist = []; let histChars = 0;
-      for (const m of prior.slice(-20).reverse()) { if (!m.t) continue; if (histChars + m.t.length > ctx * 0.25 * 3.5) break; histChars += m.t.length; hist.unshift(m); }
+      for (const m of cleanHistory(prior).slice(-20).reverse()) { if (!m.t) continue; if (histChars + m.t.length > ctx * 0.25 * 3.5) break; histChars += m.t.length; hist.unshift(m); }
       const images = []; let notes = "";
       if (visual.length) {
         const plan = visionPlan(ctx, visual.filter(a => a.mime.startsWith("image/")).length, visual.filter(a => !a.mime.startsWith("image/")).length, histChars + text.length);
@@ -1096,25 +1168,36 @@ function ChatPane(root, projectMode) {
       }
       for (const a of atts.filter(x => !visual.includes(x)))
         notes += isText(a.name, a.mime) ? `\n\nAttached file ${a.name}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 20000 })}\n\`\`\`` : `\n(Also attached: ${a.name}, ${a.mime})`;
-      const messages = [{ role: "system", content: (DIRECT_PERSONA + "\n\n" + preamble()).trim() }];
+      const messages = [{ role: "system", content: (DIRECT_PERSONA + "\n\n" + preamble() + (o.plain ? "\n\n" + PLAIN_WORDS : "")).trim() }];
       hist.forEach(m => messages.push({ role: m.u ? "user" : "assistant", content: m.t }));
       const um2 = { role: "user", content: (text || (visual.length ? "What's in this?" : "Please look at the attached file(s).")) + notes };
       if (images.length) um2.images = images;
       messages.push(um2);
       const opts = {}; if (visual.length || ctxSet) opts.num_ctx = ctx;
+      const keep = Budget.on() ? { keep_alive: "30m" } : {};
       handlers[job] = {
         out: line => {
           try {
             const j = JSON.parse(line);
             if (!got) { got = true; acc = ""; out.classList.remove("thinking"); }
+            if (j.error) am.e = true;
             if (j.error) acc += friendlyError(j.error) || (/image|vision|multimodal/i.test(j.error) ? `${runModel} can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:7b or llava, then try again.\n(${j.error})` : `Ollama error: ${j.error}`);
             else acc += j.message?.content || "";
             show();
           } catch {}
         },
-        done: p => { out.classList.remove("thinking"); if (!got) acc = ""; if (p.error && !stopped && !acc) { acc = `Couldn't reach Ollama: ${p.error}`; show(); } else show(); finish(); },
+        done: p => {
+          out.classList.remove("thinking"); if (!got) acc = "";
+          // The model wrote a tool call as text instead of answering: ask once more for plain words, then give up kindly.
+          if (!stopped && isToolCallText(acc)) {
+            if (!o.plain) { delete handlers[job]; runDirect({ plain: true }).catch(e => { acc = "Error: " + e; show(); finish(); }); return; }
+            acc = TOOLCALL_NOTE(runModel); am.e = true;
+          }
+          if (p.error && !stopped && !acc) { acc = `Couldn't reach Ollama: ${p.error}`; am.e = true; }
+          show(); finish();
+        },
       };
-      await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: runModel, stream: true, messages, ...(Object.keys(opts).length ? { options: opts } : {}) }), event: "chat-line" });
+      await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: runModel, stream: true, messages, ...keep, ...(Object.keys(opts).length ? { options: opts } : {}) }), event: "chat-line" });
     };
     const runClaw = async () => {
       job = uid();
@@ -1142,8 +1225,11 @@ function ChatPane(root, projectMode) {
             runDirect().catch(e => { acc = "Error: " + e; show(); finish(); });
             return;
           }
+          // A tool call printed as text (never run): answer again directly, in plain words.
+          if (!stopped && isToolCallText(reply)) { delete handlers[job]; runDirect({ plain: true }).catch(e => { acc = "Error: " + e; show(); finish(); }); return; }
           out.classList.remove("thinking");
           acc = reply;
+          if (!stopped && (p.code !== 0 || isErrorText(acc))) am.e = true;
           if (!stopped && /exceeds the available context size/i.test(acc)) acc = friendlyError(acc) || acc;
           if (!stopped && p.code !== 0 && !acc.trim()) acc = `claw stopped (code ${p.code}). Is Ollama running and ${runModel} downloaded?`;
           show(); finish();
@@ -1154,7 +1240,7 @@ function ChatPane(root, projectMode) {
     };
     try {
       if (visual.length || noTools) await runDirect(); else await runClaw();
-    } catch (e) { out.classList.remove("thinking"); acc = "Error: " + e; show(); finish(); }
+    } catch (e) { out.classList.remove("thinking"); acc = "Error: " + e; am.e = true; show(); finish(); }
   };
   function suggestCard(out, adv) {
     const e = adv.suggest;
@@ -1183,12 +1269,13 @@ function memorySection(hostNow) {
   let applying = false;
   const paint = () => {
     const cur = P.get("ctxLen", 0); row.innerHTML = "";
-    MEM_OPTS.forEach(([v, l]) => row.append(h("button", { class: "chip" + (v === cur ? " on" : ""), disabled: applying ? "" : null, onclick: () => apply(v) }, l)));
+    MEM_OPTS.forEach(([v, l]) => row.append(h("button", { class: "chip" + (v === cur && !Budget.on() ? " on" : ""), disabled: applying || Budget.on() ? "" : null, onclick: () => apply(v) }, l)));
     const ram = SYS ? (SYS.memTotal / 1e9).toFixed(0) : "?";
     note.textContent = (cur === 0 ? "Auto lets Ollama pick." : `${(MEM_OPTS.find(o => o[0] === cur) || [0, cur])[1]} tokens of memory.`) +
       ` Bigger uses more RAM and can be slower; 32K suits web searches on ${ram} GB. Changing it restarts Ollama on this PC` +
       (/Linux/.test(navigator.userAgent) ? " (asks for your password once)." : ".") +
-      (isLocalHost(hostNow()) ? "" : " Your Ollama address points to another computer: this only applies to this PC's Ollama.");
+      (isLocalHost(hostNow()) ? "" : " Your Ollama address points to another computer: this only applies to this PC's Ollama.") +
+      (Budget.on() ? " Memory budget is on, so the context comes from the budget below." : "");
   };
   async function apply(v) {
     const prev = P.get("ctxLen", 0);
@@ -1200,7 +1287,61 @@ function memorySection(hostNow) {
     applying = false; paint();
   }
   paint();
-  return [lbl("Memory · how much of the chat and web pages the model can hold"), row, note, st];
+  return [lbl("Memory · how much of the chat and web pages the model can hold"), row, note, st, ...budgetSection(paint)];
+}
+// Memory budget: "Use up to N GB". A model only uses its weights plus its context, so the budget becomes the biggest
+// context that fits next to the weights of the model in use (and how many models may stay loaded).
+let budgetRepaint = () => {};  // Settings sets this to repaint the model lists ("too big for budget" tags)
+function budgetSection(repaintMem) {
+  const ram = SYS ? SYS.memTotal : 0;
+  let vram = P.get("vramBytes", 0), gpuName = "";
+  const on = h("input", { type: "checkbox" }); on.checked = Budget.on();
+  const range = h("input", { type: "range", min: 2, step: 1 }), val = h("span", { class: "big", style: "min-width:64px;text-align:right" });
+  const hw = h("div", { class: "muted", style: "margin-top:4px" }), res = h("div", { class: "muted", style: "margin-top:4px" }), st = h("div", { class: "muted", style: "margin-top:2px" });
+  const applyBtn = h("button", { class: "chip hidden", style: "margin-top:6px" }, "Apply to Ollama");
+  const maxGb = () => Math.max(2, Math.floor((ram + vram) / 1e9 - 3));
+  const setRange = () => { range.max = maxGb(); range.value = Math.min(maxGb(), P.get("budgetGB", 0) || P.get("budgetLast", Math.min(maxGb(), Math.round(ram / 1e9 * 0.75) || 8))); val.textContent = range.value + " GB"; };
+  const paint = async () => {
+    hw.textContent = `This PC: ${(ram / 1e9).toFixed(0)} GB RAM` + (vram ? ` · ${Math.round(vram / 2 ** 30)} GB VRAM${gpuName ? " (" + gpuName + ")" : ""}` : " · graphics memory not detected") + `. Up to ${maxGb()} GB leaves room for the system.`;
+    range.disabled = !on.checked; val.style.opacity = on.checked ? 1 : .5;
+    if (!on.checked) { res.textContent = "Off: Ollama sizes memory itself (the Memory setting above)."; applyBtn.classList.add("hidden"); return; }
+    const m = S.model; await Caps.get(m);
+    const p = Budget.plan(m, +range.value);
+    res.textContent = !p ? `Working out what fits for ${m}…` : p.tooBig
+      ? `${m} is too big for ${range.value} GB: it still runs, with a 4K context (~${(p.bytes / 1e9).toFixed(0)} GB), and Ollama loads what it can.`
+      : `${m}: ≈ ${Math.round(p.ctx / 1024)}K context, ~${(p.bytes / 1e9).toFixed(0)} GB.`;
+    applyBtn.classList.toggle("hidden", !(Budget.on() && normName(P.get("budgetFor", "")) !== normName(m)));
+  };
+  let applying = false, again = false;
+  const apply = async () => {
+    if (applying) { again = true; return; } applying = true;
+    const gb = on.checked ? +range.value : 0;
+    P.set("budgetGB", gb); if (gb) P.set("budgetLast", gb);
+    if (gb) {
+      const m = S.model; await Caps.get(m);
+      const p = Budget.plan(m, gb);
+      const c = Caps.known(m), size = Caps.sizes[normName(m)] || 0;
+      const at8k = c && c.kvTok ? size + 0.8e9 + size * 0.05 + 8192 * c.kvTok : 0;
+      P.set("budgetCtx", p ? p.ctx : 0); P.set("budgetFor", m);
+      // Room for more than one model at a usual context: let Ollama keep several loaded.
+      P.set("budgetMaxLoaded", at8k ? Math.max(1, Math.min(3, Math.floor(gb * 1e9 / at8k))) : 1);
+    }
+    repaintMem(); paint(); budgetRepaint();
+    st.style.color = ""; st.textContent = "Applying…";
+    try { st.textContent = await invoke("set_ollama_memory", ollamaEnv()); setTimeout(pollStatus, 2500); }
+    catch (e) { st.style.color = "#eb5a50"; st.textContent = "Couldn't apply: " + e; }
+    applying = false; paint();
+    if (again) { again = false; apply(); }
+  };
+  on.onchange = () => { paint(); apply(); };
+  range.addEventListener("input", () => { val.textContent = range.value + " GB"; paint(); });
+  range.addEventListener("change", apply);
+  applyBtn.onclick = apply;
+  setRange(); paint();
+  invoke("gpu_info").then(g => { if (g && g.vram) { vram = g.vram; gpuName = g.name || ""; P.set("vramBytes", vram); setRange(); paint(); } }).catch(() => {});
+  return [lbl("Memory budget · let models use up to a set amount of RAM and graphics memory"),
+    h("div", { class: "row" }, h("label", { class: "switch", style: "gap:8px;flex:none" }, on, "Use up to"), h("div", { class: "grow" }, range), val),
+    hw, res, applyBtn, st];
 }
 // "Models for tasks": pick an installed model per kind of task, or Auto.
 function taskModelsSection() {
@@ -1212,7 +1353,7 @@ function taskModelsSection() {
       const sel = h("select", { class: "field" });
       sel.append(h("option", { value: "" }, "Auto"));
       const opts = [...new Set([...(names || []), ...(cur ? [cur] : [])])];
-      const optLabel = n => n + (Caps.noTools(n) ? "  · no tools" : "") + (names && !names.some(x => normName(x) === normName(n)) ? " (not installed)" : "");
+      const optLabel = n => n + (Caps.noTools(n) ? "  · no tools" : "") + (Budget.tooBig(n) ? "  · too big for budget" : "") + (names && !names.some(x => normName(x) === normName(n)) ? " (not installed)" : "");
       opts.forEach(n => sel.append(h("option", { value: n }, optLabel(n))));
       sel.value = cur;
       // Tools switch: on by default; greyed out when the picked model can't use tools.
@@ -1269,7 +1410,8 @@ function openSettings() {
     if (!l.length) installed.append(h("div", { class: "muted" }, instList.length ? `No installed model matches "${mq.value.trim()}".` : "None yet. Download one above."));
     l.forEach(x => { const on = normName(x.name) === normName(model.value.trim());
       installed.append(h("div", { class: "inst" + (on ? " on" : ""), title: x.name, onclick: () => { model.value = x.name; P.set("model", x.name); pollStatus(); renderInst(); } },
-        h("span", { class: "grow" }, x.name, Caps.noTools(x.name) ? h("span", { class: "notools", title: "This model can't use tools, so claw chats with it directly" }, "no tools") : null),
+        h("span", { class: "grow" }, x.name, Caps.noTools(x.name) ? h("span", { class: "notools", title: "This model can't use tools, so claw chats with it directly" }, "no tools") : null,
+          Budget.tooBig(x.name) ? h("span", { class: "notools toobig", title: "Bigger than your Memory budget. It still works, with a small (4K) context." }, "too big for budget") : null),
         h("span", { class: "muted" }, `${(x.size / 1e9).toFixed(1)} GB · ${on ? "In use" : "Use"}`))); });
     // Learn tool support for models not checked yet, then repaint once.
     renderInst.tried = renderInst.tried || new Set();
@@ -1283,6 +1425,7 @@ function openSettings() {
     : `Best with 1–3B models like llama3.2:3b or qwen2.5-coder:1.5b.`) + " To show it photos or videos, use a vision model like gemma3:4b or qwen2.5vl:7b.";
   const save = () => { P.set("host", host.value.trim() || "http://127.0.0.1:11434"); P.set("model", model.value.trim() || "llama3.2:3b"); pollStatus(); };
   const tasks = taskModelsSection();
+  budgetRepaint = () => { renderInst(); tasks.render(instList && instList.map(x => x.name)); };
   const refresh = async () => { try { instList = (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).sort((a, b) => a.name.localeCompare(b.name)); } catch { instList = null; } renderInst(); tasks.render(instList && instList.map(x => x.name)); };
   const pull = h("button", { class: "btn-accent", style: "margin:12px 0 4px", onclick: async () => {
     save(); prog.classList.remove("hidden"); pull.disabled = true; const id = uid();
@@ -1297,7 +1440,7 @@ function openSettings() {
     toggle("Suggest a better model to download when one would do the task better", "suggestModels", true, v => { if (v) P.set("noSuggest", []); }), h("div", { class: "muted", style: "margin-top:8px" }, tip),
     ...tasks.els,
     ...memorySection(() => host.value.trim() || S.host), pull, prog, pst,
-    h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama", { ctxLen: P.get("ctxLen", 0) }).then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
+    h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama", ollamaEnv()).then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
     h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"),
     ...githubSection());
   modal("Settings", body, [["Done", save, true]]);
@@ -1572,7 +1715,7 @@ let chatPane, projPane;
   renderHome();
   if (PATHS.clawFound === false) chatPane.input.placeholder = "claw binary missing from this install";
   // Try to start Ollama once if it isn't running locally.
-  try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", { ctxLen: P.get("ctxLen", 0) }).catch(() => {}); }
+  try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", ollamaEnv()).catch(() => {}); }
   pollStatus(); setInterval(pollStatus, 4000);
   checkNewModels(false); setInterval(() => checkNewModels(false), 30 * 60000);
   addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
