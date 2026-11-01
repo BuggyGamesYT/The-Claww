@@ -186,3 +186,8 @@ body.wide #projSide { display: block; width: 28%; flex: none; overflow-y: auto; 
 .side-chat.on, .side-chat:hover { color: var(--fg); }
 
 .suggest { border-radius: 18px; padding: 12px 14px; margin-top: 6px; max-width: 80%; }
+
+/* Live status line while the model works ("Searching the web for …") */
+.bubble.thinking { background: color-mix(in srgb, var(--surface2) 45%, transparent) !important; color: var(--muted) !important;
+  border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent); border-radius: 999px; animation: claww-pulse 1.8s ease-in-out infinite; }
+@keyframes claww-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }

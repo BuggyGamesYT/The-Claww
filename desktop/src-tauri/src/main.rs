@@ -62,6 +62,7 @@ fn claw_run(app: AppHandle, jobs: State<'_, Jobs>, id: String, prompt: String, m
         .env("OLLAMA_HOST", &host)
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
+        .env("CLAW_TOOL_EVENTS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

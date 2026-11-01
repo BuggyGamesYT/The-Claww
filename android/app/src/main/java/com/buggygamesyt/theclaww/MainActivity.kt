@@ -997,7 +997,16 @@ class MainActivity : Activity() {
             val outCol = out.parent as LinearLayout
             thread {
                 val sb = StringBuilder()
-                fun show() { val s = sb.toString().trim(); runOnUiThread { out.text = s.ifEmpty { "…" }; scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } } }
+                // Text starting with ToolSteps.LIVE is a live status line ("Searching the web for …"), drawn as a soft pill.
+                fun show() { val s = sb.toString().trim(); val live = s.startsWith(ToolSteps.LIVE); val txt = s.removePrefix(ToolSteps.LIVE)
+                    runOnUiThread {
+                        out.text = txt.ifEmpty { "…" }
+                        if (live) {
+                            out.setTextColor(muted)
+                            out.background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = dp(22).toFloat(); setStroke(dp(1), withAlpha(fg, 50)); setColor(withAlpha(surface2, 110)) }
+                        } else { out.setTextColor(bubbleFg(false)); out.background = bubbleBg(false) }
+                        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+                    } }
                 // Model advice: auto-switch to a better installed model, and/or suggest a better one to download.
                 runModel = model
                 val adv = installedModels()?.let { inst ->
@@ -1081,17 +1090,18 @@ class MainActivity : Activity() {
                 "--dangerously-skip-permissions", "--output-format", "json", "prompt", prompt).directory(work).redirectErrorStream(true)
             val e = pb.environment(); env(e)
             e["CLAW_CONFIG_HOME"] = File(filesDir, "home/.claw").absolutePath
-            e["NO_COLOR"] = "1"; e["TERM"] = "dumb"; e["OLLAMA_HOST"] = host
+            e["NO_COLOR"] = "1"; e["TERM"] = "dumb"; e["OLLAMA_HOST"] = host; e["CLAW_TOOL_EVENTS"] = "1"
             val p = pb.start(); proc = p; p.outputStream.close()
             // claw answers with one JSON line at the end: show only the reply plus a short line per tool used,
             // never the raw search results / tool output the model reads.
-            sb.setLength(0); sb.append("Working…"); show()
+            sb.setLength(0); sb.append(ToolSteps.LIVE).append("Thinking…"); show()
             val raw = StringBuilder()
             p.inputStream.bufferedReader().use { r ->
-                val buf = CharArray(512)
                 while (true) {
-                    val n = r.read(buf); if (n < 0) break
-                    raw.append(String(buf, 0, n))
+                    val line = r.readLine() ?: break
+                    val st = ToolSteps.status(line)
+                    if (st != null) { if (!stopped) { sb.setLength(0); sb.append(ToolSteps.LIVE).append(st).append("…"); show() } }
+                    else raw.append(line).append('\n')
                 }
             }
             val code = p.waitFor()

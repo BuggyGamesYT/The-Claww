@@ -14665,6 +14665,10 @@ impl CliToolExecutor {
 
 impl ToolExecutor for CliToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        // The Claww app: live status line for each tool step (opt-in, stderr only).
+        if std::env::var_os("CLAW_TOOL_EVENTS").is_some() {
+            eprintln!("CLAW_TOOL {}", json!({ "name": tool_name, "input": input }));
+        }
         if self
             .allowed_tools
             .as_ref()
