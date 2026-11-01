@@ -125,7 +125,7 @@ class MainActivity : Activity() {
 
         // Top bar: settings (with status dot) · Home | Chat | Projects · look
         val tabs = LinearLayout(this).apply {
-            background = round(surface, 24); setPadding(dp(4), dp(4), dp(4), dp(4))
+            background = panel(24); setPadding(dp(4), dp(4), dp(4), dp(4))
             listOf("Home", "Chat", "Projects").forEachIndexed { i, name ->
                 val tv = TextView(this@MainActivity).apply {
                     text = name; textSize = 15f; gravity = Gravity.CENTER
@@ -136,7 +136,7 @@ class MainActivity : Activity() {
             }
         }
         val settingsBtn = FrameLayout(this).apply {
-            background = round(surface, 20)
+            background = panel(20)
             addView(TextView(this@MainActivity).apply { text = "⚙"; textSize = 18f; setTextColor(fg); gravity = Gravity.CENTER },
                 FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             val dot = View(this@MainActivity).apply { background = round(muted, 5) }
@@ -145,7 +145,7 @@ class MainActivity : Activity() {
             setOnClickListener { openSettings() }
         }
         val lookBtn = FrameLayout(this).apply {
-            background = round(surface, 20)
+            background = panel(20)
             addView(TextView(this@MainActivity).apply { text = "◐"; textSize = 18f; setTextColor(fg); gravity = Gravity.CENTER },
                 FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             setOnClickListener { openLook() }
@@ -227,8 +227,36 @@ class MainActivity : Activity() {
         setOnClickListener { onClick() }
     }
 
+    // ---------- Glass & bubble opacity ----------
+    private val glassOn get() = prefs.getBoolean("glass", false)
+    private val glassTints get() = listOf(
+        "Clear" to Color.WHITE, "Theme" to t.accent, "Blue" to Color.rgb(90, 160, 255), "Mint" to Color.rgb(80, 220, 180),
+        "Pink" to Color.rgb(255, 120, 190), "Violet" to Color.rgb(170, 120, 255), "Amber" to Color.rgb(255, 190, 80), "Smoke" to Color.rgb(20, 20, 24))
+    private fun glassTint() = glassTints.firstOrNull { it.first == prefs.getString("glassTint", "Clear") }?.second ?: Color.WHITE
+    private fun withAlpha(c: Int, a: Int) = (c and 0x00FFFFFF) or (a.coerceIn(0, 255) shl 24)
+
+    /** Liquid glass: translucent tint, a soft top sheen and a bright hairline rim. */
+    private fun glass(r: Int, tint: Int, strength: Int = prefs.getInt("glassStrength", 30)): android.graphics.drawable.Drawable {
+        val rad = dp(r).toFloat()
+        val fill = GradientDrawable().apply { setColor(withAlpha(tint, 20 + strength * 2)); cornerRadius = rad }
+        val sheen = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(withAlpha(Color.WHITE, 60), withAlpha(Color.WHITE, 8), withAlpha(Color.WHITE, 0))).apply { cornerRadius = rad }
+        val rim = GradientDrawable().apply { setColor(Color.TRANSPARENT); cornerRadius = rad; setStroke(dp(1), withAlpha(Color.WHITE, 90)) }
+        return android.graphics.drawable.LayerDrawable(arrayOf(fill, sheen, rim))
+    }
+
+    /** Background for cards, bars and buttons: glass when on, otherwise the theme surface. */
+    private fun panel(r: Int): android.graphics.drawable.Drawable = if (glassOn) glass(r, glassTint()) else round(surface, r)
+
+    /** Chat bubble background honoring the bubble opacity slider (0–100). */
+    private fun bubbleBg(user: Boolean): android.graphics.drawable.Drawable {
+        val op = prefs.getInt("bubbleOpacity", 100)
+        if (glassOn) return glass(18, if (user) accent else glassTint(), prefs.getInt("glassStrength", 30) * op / 100)
+        return round(withAlpha(if (user) accent else t.surface, op * 255 / 100), 18)
+    }
+    private fun bubbleFg(user: Boolean) = if (user && !glassOn && prefs.getInt("bubbleOpacity", 100) >= 60) t.onAccent else fg
+
     private fun card(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL; background = round(surface, 22)
+        orientation = LinearLayout.VERTICAL; background = panel(22)
         setPadding(dp(18), dp(16), dp(18), dp(16))
     }
 
@@ -291,7 +319,7 @@ class MainActivity : Activity() {
             homeList.addView(v, cardLp())
         }
         val add = LinearLayout(this).apply {
-            gravity = Gravity.CENTER; background = round(surface, 22); setPadding(dp(16), dp(16), dp(16), dp(16))
+            gravity = Gravity.CENTER; background = panel(22); setPadding(dp(16), dp(16), dp(16), dp(16))
             addView(Glyph(this@MainActivity, "plus", fg), LinearLayout.LayoutParams(dp(14), dp(14)).apply { rightMargin = dp(10) })
             addView(text("Add a widget", 15f, fg))
             setOnClickListener { addWidget() }
@@ -592,7 +620,7 @@ class MainActivity : Activity() {
             }
             // Pill: attachment previews on top, input row below; button sits 4dp from the pill edge.
             val composer = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL; background = round(surface, 26)
+                orientation = LinearLayout.VERTICAL; background = panel(26)
                 addView(attScroll, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                 addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             }
@@ -665,8 +693,8 @@ class MainActivity : Activity() {
             val tv = TextView(this@MainActivity).apply {
                 text = s; textSize = 15.5f; setTextIsSelectable(true)
                 setLineSpacing(0f, 1.15f)
-                setTextColor(if (user) t.onAccent else fg)
-                background = round(if (user) accent else surface, 18)
+                setTextColor(bubbleFg(user))
+                background = bubbleBg(user)
                 setPadding(dp(14), dp(10), dp(14), dp(10))
                 maxWidth = (resources.displayMetrics.widthPixels * 0.8).toInt()
                 if (s.isEmpty()) visibility = View.GONE
@@ -1134,6 +1162,9 @@ class MainActivity : Activity() {
                     FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             } catch (_: Exception) { }
         }
+        val blur = prefs.getInt("blur", 0)
+        if (Build.VERSION.SDK_INT >= 31 && blur > 0) for (k in 0 until root.childCount)
+            root.getChildAt(k).setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(blur).toFloat(), dp(blur).toFloat(), android.graphics.Shader.TileMode.CLAMP))
         if (w != "None") {
             val dim = prefs.getInt("dim", 45)
             root.addView(View(this).apply { setBackgroundColor((t.bg and 0x00FFFFFF) or ((dim * 255 / 100) shl 24)) },
@@ -1184,6 +1215,29 @@ class MainActivity : Activity() {
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "video/*" }, 43)
             } else { prefs.edit().putString("wall", name).apply(); recreate() }
         })
+        fun slider(name: String, key: String, def: Int, max: Int) {
+            box.addView(label(name))
+            box.addView(android.widget.SeekBar(this).apply {
+                this.max = max; progress = prefs.getInt(key, def)
+                setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: android.widget.SeekBar, v: Int, user: Boolean) {}
+                    override fun onStartTrackingTouch(sb: android.widget.SeekBar) {}
+                    override fun onStopTrackingTouch(sb: android.widget.SeekBar) { prefs.edit().putInt(key, sb.progress).apply(); dialog?.dismiss(); recreate() }
+                })
+            })
+        }
+        slider("Chat bubble opacity", "bubbleOpacity", 100, 100)
+        box.addView(label("Liquid glass"))
+        box.addView(Switch(this).apply {
+            text = "Glass bubbles, cards and bars"; setTextColor(fg); isChecked = glassOn
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("glass", on).apply(); dialog?.dismiss(); recreate() }
+        })
+        box.addView(label("Glass tint"))
+        box.addView(swatchRow(glassTints.map { (name, c) ->
+            name to GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(withAlpha(c, 230), withAlpha(c, 90)))
+        }, prefs.getString("glassTint", "Clear")!!) { name -> prefs.edit().putString("glassTint", name).putBoolean("glass", true).apply(); dialog?.dismiss(); recreate() })
+        slider("Glass tint strength", "glassStrength", 30, 100)
+        if (Build.VERSION.SDK_INT >= 31) slider("Wallpaper blur (frosted glass)", "blur", 0, 25)
         box.addView(label("Wallpaper dimming"))
         box.addView(android.widget.SeekBar(this).apply {
             max = 90; progress = prefs.getInt("dim", 45)
