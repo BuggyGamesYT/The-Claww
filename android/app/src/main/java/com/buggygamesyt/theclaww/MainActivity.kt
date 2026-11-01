@@ -1103,11 +1103,25 @@ class MainActivity : Activity() {
     }
 
     // ===================== Themes & wallpapers =====================
+    /** Animated wallpapers: name -> (kind, background, colors). "Theme flow" follows the current theme (incl. Material You). */
+    private fun animatedWalls(): List<Pair<String, Triple<String, Int, IntArray>>> = listOf(
+        "Theme flow" to Triple("blobs", t.bg, intArrayOf(t.accent, t.surface2, Color.rgb(Color.blue(t.accent), Color.red(t.accent), Color.green(t.accent)))),
+        "Lava" to Triple("blobs", Color.rgb(25, 8, 20), intArrayOf(Color.rgb(255, 90, 40), Color.rgb(230, 40, 120), Color.rgb(140, 40, 200), Color.rgb(255, 170, 60))),
+        "Aurora flow" to Triple("blobs", Color.rgb(6, 12, 30), intArrayOf(Color.rgb(30, 220, 160), Color.rgb(40, 120, 255), Color.rgb(160, 80, 255))),
+        "Starfield" to Triple("stars", Color.rgb(4, 6, 16), intArrayOf(Color.WHITE, Color.rgb(90, 70, 200))),
+        "Waves" to Triple("waves", Color.rgb(8, 16, 36), intArrayOf(Color.rgb(40, 110, 220), Color.rgb(30, 170, 200), Color.rgb(90, 80, 220), Color.rgb(20, 200, 170))),
+    )
+
     private fun applyWallpaper(root: FrameLayout) {
         val w = prefs.getString("wall", "None")
         val grad = wallpapers.firstOrNull { it.first == w }?.second
         if (grad != null) {
             root.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, grad)
+        } else if (animatedWalls().any { it.first == w }) {
+            val (kind, wbg, cols) = animatedWalls().first { it.first == w }.second
+            root.addView(AnimatedWall(this, kind, wbg, cols), FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        } else if (w == "Your video") {
+            try { root.addView(VideoWall(this, Uri.parse(prefs.getString("wallVideo", ""))), FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) } catch (_: Exception) {}
         } else if (w == "Your photo") {
             try {
                 val uri = Uri.parse(prefs.getString("wallUri", ""))
@@ -1161,6 +1175,15 @@ class MainActivity : Activity() {
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "image/*" }, 42)
             } else { prefs.edit().putString("wall", name).apply(); recreate() }
         })
+        box.addView(label("Animated wallpaper"))
+        box.addView(swatchRow(animatedWalls().map { (name, v) ->
+            name to GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(v.third[0], v.second, v.third[v.third.size - 1]))
+        } + ("Your video" to GradientDrawable().apply { setColor(t.surface2) }), prefs.getString("wall", "None")!!) { name ->
+            dialog?.dismiss()
+            if (name == "Your video") {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "video/*" }, 43)
+            } else { prefs.edit().putString("wall", name).apply(); recreate() }
+        })
         box.addView(label("Wallpaper dimming"))
         box.addView(android.widget.SeekBar(this).apply {
             max = 90; progress = prefs.getInt("dim", 45)
@@ -1182,6 +1205,11 @@ class MainActivity : Activity() {
             val uri = data.data ?: return
             try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
             prefs.edit().putString("wall", "Your photo").putString("wallUri", uri.toString()).apply()
+            recreate()
+        } else if (requestCode == 43) {
+            val uri = data.data ?: return
+            try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
+            prefs.edit().putString("wall", "Your video").putString("wallVideo", uri.toString()).apply()
             recreate()
         } else if (requestCode == 77) {
             val pane = pickingPane ?: return
