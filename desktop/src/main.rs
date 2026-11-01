@@ -208,6 +208,8 @@ struct Config {
     clear: u8,
     /// Liquid glass tint, one of GLASS_TINTS.
     tint: String,
+    /// Colour picked for the "Custom" glass tint.
+    tint_rgb: [u8; 3],
     builtin: bool,
     host: String,
     model: String,
@@ -225,6 +227,7 @@ impl Default for Config {
             bubble: "Solid".into(),
             clear: 0,
             tint: "Theme".into(),
+            tint_rgb: [120, 200, 255],
             builtin: true,
             host: String::new(),
             model,
@@ -750,8 +753,10 @@ impl App {
     fn bubble_style(&self, base: Color32) -> (Color32, Stroke, bool) {
         let keep = 1.0 - self.cfg.clear.min(90) as f32 / 100.0;
         if self.cfg.bubble == "Liquid glass" {
+            let [cr, cg, cb] = self.cfg.tint_rgb;
             let tint = match GLASS_TINTS.iter().find(|(n, _)| *n == self.cfg.tint) {
                 Some((n, c)) if *n != "Theme" => *c,
+                _ if self.cfg.tint == "Custom" => Color32::from_rgb(cr, cg, cb),
                 _ => mixc(base, Color32::WHITE, 0.18),
             };
             let a = (0.42 * keep * 255.0).clamp(10.0, 255.0) as u8;
@@ -982,6 +987,19 @@ impl App {
                                 restyle = true;
                             }
                         }
+                    });
+                    ui.horizontal(|ui| {
+                        // Any colour: opening the picker switches the glass to that custom tint.
+                        let [r, g, b] = self.cfg.tint_rgb;
+                        let mut c = Color32::from_rgb(r, g, b);
+                        let resp = egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque);
+                        if resp.changed() || resp.clicked() {
+                            self.cfg.tint_rgb = [c.r(), c.g(), c.b()];
+                            self.cfg.tint = "Custom".into();
+                            restyle = true;
+                        }
+                        let label = if self.cfg.tint == "Custom" { "Custom colour (in use)" } else { "Custom colour" };
+                        ui.label(RichText::new(label).size(12.0).color(t.muted));
                     });
                 }
                 ui.label(RichText::new("Bubble transparency").size(12.0).color(t.muted));
