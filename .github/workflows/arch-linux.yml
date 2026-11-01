@@ -6,6 +6,7 @@ on:
     paths:
       - packaging/arch/**
       - rust/**
+      - desktop/**
       - .github/workflows/arch-linux.yml
   pull_request:
     paths:
@@ -65,6 +66,8 @@ jobs:
           cd packaging/arch
           pacman -U --noconfirm the-claww-git-*.pkg.tar.zst
           claw --version
+          the-claww --version
+          test -f /usr/share/applications/the-claww.desktop
           grep -q 'qwen3-coder:30b' /etc/the-claww/env
           pacman -Ql the-claww-git
 

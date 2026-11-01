@@ -9,11 +9,11 @@ pkgname=the-claww-git
 _name=the-claww
 pkgver=0.1.9.r0.g0000000
 pkgrel=1
-pkgdesc="Claw Code: Rust agent CLI (claw), preconfigured for local Ollama"
+pkgdesc="The Claww: desktop chat app and claw agent CLI, preconfigured for local Ollama"
 arch=('x86_64' 'aarch64')
 url="https://github.com/BuggyGamesYT/The-Claww"
 license=('MIT')
-depends=('gcc-libs' 'glibc')
+depends=('gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'wayland' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'hicolor-icon-theme')
 makedepends=('cargo' 'git')
 optdepends=('ollama: run models locally (default backend)'
             'ollama-cuda: Ollama with NVIDIA GPU support'
@@ -26,8 +26,10 @@ options=('!lto' '!debug')
 source=("${_name}::git+${CLAWW_REPO:-https://github.com/BuggyGamesYT/The-Claww.git}#${CLAWW_REF:-branch=main}"
         'claw-wrapper.sh'
         'the-claww.env'
-        'settings.example.json')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+        'settings.example.json'
+        'the-claww.desktop'
+        'the-claww.svg')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 pkgver() {
   cd "${_name}"
@@ -47,6 +49,10 @@ build() {
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release -p rusty-claude-cli
+
+  # Desktop app (same chat app as the Android version).
+  cd "${srcdir}/${_name}/desktop"
+  cargo build --release
 }
 
 package() {
@@ -55,6 +61,10 @@ package() {
   install -Dm755 "${_name}/rust/target/release/claw" "${pkgdir}/usr/lib/${_name}/claw"
   install -Dm755 claw-wrapper.sh "${pkgdir}/usr/bin/claw"
   install -Dm644 the-claww.env "${pkgdir}/etc/the-claww/env"
+
+  install -Dm755 "${_name}/desktop/target/release/the-claww" "${pkgdir}/usr/bin/the-claww"
+  install -Dm644 the-claww.desktop "${pkgdir}/usr/share/applications/the-claww.desktop"
+  install -Dm644 the-claww.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/the-claww.svg"
 
   install -Dm644 "${_name}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=The Claww
+GenericName=AI Coding Agent
+Comment=Chat with the claw agent on your local Ollama
+Exec=the-claww
+Icon=the-claww
+Terminal=false
+Categories=Development;Utility;
+Keywords=AI;Ollama;Claw;Agent;Chat;
+StartupWMClass=the-claww

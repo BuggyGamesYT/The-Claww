@@ -1,0 +1,21 @@
+[package]
+name = "the-claww-desktop"
+version = "0.1.9"
+edition = "2021"
+license = "MIT"
+description = "The Claww desktop app: chat with the claw agent on local Ollama"
+
+[[bin]]
+name = "the-claww"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.29"
+ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[profile.release]
+strip = true
