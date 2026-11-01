@@ -1,6 +1,6 @@
 name: Claww release (Android + Windows + Linux)
 
-# One combined release: Android APK, Windows installer, Linux AppImage/.deb (Arch: use the AppImage).
+# One combined release: Android APK, Windows installer, Arch Linux .pkg.tar.zst (plus AppImage/.deb for other distros).
 # Marked Latest so it always sits on top. Started by upstream-sync.yml or by hand.
 on:
   workflow_dispatch:
@@ -30,17 +30,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXTRA: ${{ inputs.notes }}
         run: |
-          # Version goes up by one patch every release: start from the app version, skip any already released.
-          ver=$(jq -r .version desktop/package.json)
-          last=$(git tag -l 'claww-v*' | sed 's/^claww-v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
-          if [ -n "$last" ] && [ "$(printf '%s\n%s\n' "$last" "$ver" | sort -V | tail -1)" = "$last" ]; then
-            IFS=. read -r a b c <<< "$last"; ver="$a.$b.$((c+1))"
-          fi
-          tag="claww-v${ver}"
+          # Release version = the original ultraworkers/claw-code's latest version (v0.1.9 now, then v0.2.0 …).
+          up_tag=$(gh api repos/ultraworkers/claw-code/releases/latest --jq .tag_name 2>/dev/null || true)
+          [ -z "$up_tag" ] && up_tag=$(git ls-remote --tags --refs https://github.com/ultraworkers/claw-code.git | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          ver="${up_tag#v}"; [ -z "$ver" ] && ver=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//')
+          # Several Claww builds on the same claw-code version get -2, -3 … in the tag, title and notes.
+          # Always go one past the highest existing build number, so a deleted older tag is never reused.
+          n=$( { gh release list --limit 200 --json tagName -q '.[].tagName' 2>/dev/null; git tag -l; } | sed -n "s/^claww-v${ver//./\\.}\(-\([0-9]\+\)\)\?$/\2/p" | sed 's/^$/1/' | sort -n | tail -1)
+          if [ -z "$n" ]; then tag="claww-v${ver}"; label="v${ver}"; else tag="claww-v${ver}-$((n+1))"; label="v${ver}-$((n+1))"; fi
           up=$(git log -1 --format='%h %s' --first-parent origin/main 2>/dev/null || true)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           {
-            echo "## The Claww v${ver}"
+            echo "## The Claww ${label}"
             echo
             echo "One release for every device. Same app everywhere: Home widgets, Chat, Projects, themes, liquid glass, animated wallpapers, photo/video/file attachments, running on Ollama."
             echo
@@ -48,14 +49,15 @@ jobs:
             echo "|---|---|"
             echo "| **TheClaww.apk** | Android arm64: Pixel Tablet, Pixel 10 Pro XL and other 64-bit phones/tablets. Ollama runs inside the app. |"
             echo "| **TheClaww-windows-x64-setup.exe** | Windows 10/11 installer. Install Ollama for Windows first. |"
-            echo "| **TheClaww-linux-x86_64.AppImage** | Arch Linux (and any distro): \`chmod +x\` then run. Needs \`ollama\` (pacman -S ollama). |"
-            echo "| **TheClaww-linux-amd64.deb** | Debian / Ubuntu. |"
+            echo "| **TheClaww-arch-x86_64.pkg.tar.zst** | Arch Linux: \`sudo pacman -U TheClaww-arch-x86_64.pkg.tar.zst\`, then \`sudo pacman -S ollama\`. |"
+            echo "| TheClaww-linux-x86_64.AppImage / TheClaww-linux-amd64.deb | Other distros (Debian/Ubuntu etc.). |"
             echo
             echo "Built from \`android-app\` at ${GITHUB_SHA::7}. Upstream claw-code: ${up}."
             [ -n "$EXTRA" ] && { echo; echo "$EXTRA"; }
+            echo; cat .github/release-install.md
           } > notes.md
           gh release create "$tag" --draft --target "$GITHUB_SHA" \
-            --title "The Claww v${ver} · PC & Android (Pixel Tablet & Pixel 10 Pro XL) + Arch Linux & Windows desktop app" --notes-file notes.md
+            --title "The Claww ${label} · PC & Android (Pixel Tablet & Pixel 10 Pro XL) + Arch Linux & Windows desktop app" --notes-file notes.md
 
   android:
     needs: create
