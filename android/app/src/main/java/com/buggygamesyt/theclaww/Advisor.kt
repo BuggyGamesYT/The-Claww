@@ -54,3 +54,28 @@ object Advisor {
         return Advice(task, switchTo, suggest)
     }
 }
+
+/** Photo/video chats: how much memory to ask for, and how many frames at what size fit in it. */
+object VisionCtx {
+    class Plan(val frames: Int, val imgMax: Int, val vidMax: Int)
+
+    /** The Memory setting, or when it's Auto a roomier 16K (8K on devices with less RAM). */
+    fun ctx(memSetting: Int, ramGb: Double) = if (memSetting > 0) memSetting else if (ramGb >= 7.5) 16384 else 8192
+
+    fun plan(ctx: Int, nImages: Int, nVideos: Int, textChars: Int): Plan {
+        val frames = if (ctx >= 16384) 6 else if (ctx >= 8192) 4 else 3
+        val count = maxOf(1, nImages + nVideos * frames)
+        val budget = maxOf(600.0, ctx * 0.55 - textChars / 3.5)
+        // About one token per 28x28 pixel patch; 2.5x margin because models count image tokens differently.
+        val side = (28 * Math.sqrt(budget / count / 2.5)).toInt()
+        return Plan(frames, side.coerceIn(224, 1024), side.coerceIn(224, 768))
+    }
+
+    /** "request (4304 tokens) exceeds the available context size (4096 tokens)" -> plain words and what to do. */
+    fun friendly(err: String): String? {
+        if (!Regex("exceeds the available context|context size|context length|context window|too many tokens", RegexOption.IGNORE_CASE).containsMatchIn(err)) return null
+        val m = Regex("\\((\\d+) tokens\\)[^(]*\\((\\d+) tokens\\)").find(err)
+        return "That was more than the model can hold in its memory" + (if (m != null) " (it needed ${m.groupValues[1]} tokens, ${m.groupValues[2]} were available)" else "") +
+            ". Open Settings and set Memory to 16K or 32K (bigger uses more RAM), then send it again."
+    }
+}

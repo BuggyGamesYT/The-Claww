@@ -5,7 +5,7 @@
 use base64::Engine;
 use serde_json::json;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,10 +33,33 @@ fn data_dir(app: &AppHandle) -> PathBuf {
     d
 }
 
-fn claw_path() -> PathBuf {
+fn exe_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
-    let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    dir.join(if cfg!(windows) { "claw.exe" } else { "claw" })
+    exe.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+}
+
+fn claw_path() -> PathBuf {
+    exe_dir().join(if cfg!(windows) { "claw.exe" } else { "claw" })
+}
+
+/// claw's user config folder (its settings.json, MCP servers): CLAW_CONFIG_HOME, else ~/.claw.
+fn claw_home() -> PathBuf {
+    if let Some(p) = std::env::var_os("CLAW_CONFIG_HOME") { return PathBuf::from(p); }
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir).join(".claw")
+}
+
+/// Write a file only this user can read (0600 on Linux). Used for the GitHub token and claw's settings.
+fn write_private(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    if let Some(d) = path.parent() { std::fs::create_dir_all(d).map_err(|e| e.to_string())?; }
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; o.mode(0o600); }
+    let mut f = o.open(path).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600)); }
+    f.write_all(data).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -63,6 +86,7 @@ fn claw_run(app: AppHandle, jobs: State<'_, Jobs>, id: String, prompt: String, m
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
         .env("CLAW_TOOL_EVENTS", "1")
+        .env("CLAW_CONFIG_HOME", claw_home())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -287,6 +311,176 @@ fn apply_memory(n: u32) -> Result<String, String> {
     Err("The Memory setting works on Windows and Linux.".into())
 }
 
+// ---------- GitHub: token kept privately, GitHub's MCP server added to claw's settings ----------
+const GITHUB_MCP_URL: &str = "https://api.githubcopilot.com/mcp/";
+
+fn github_token_file(app: &AppHandle) -> PathBuf { data_dir(app).join("github_token") }
+
+fn set_claw_github(token: Option<&str>) -> Result<(), String> {
+    let path = claw_home().join("settings.json");
+    let mut v: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s)
+            .map_err(|e| format!("claw's settings file ({}) isn't valid JSON, so it was left alone: {e}", path.display()))?,
+        _ => json!({}),
+    };
+    if !v.is_object() { return Err(format!("claw's settings file ({}) isn't a JSON object, so it was left alone.", path.display())); }
+    let obj = v.as_object_mut().unwrap();
+    match token {
+        Some(t) => {
+            let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
+            if !servers.is_object() { *servers = json!({}); }
+            servers.as_object_mut().unwrap().insert("github".into(), json!({
+                "type": "http",
+                "url": GITHUB_MCP_URL,
+                "headers": { "Authorization": format!("Bearer {t}") }
+            }));
+        }
+        None => {
+            let empty = match obj.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+                Some(s) => { s.remove("github"); s.is_empty() }
+                None => false,
+            };
+            if empty { obj.remove("mcpServers"); }
+            if obj.is_empty() && !path.exists() { return Ok(()); }
+        }
+    }
+    let text = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    write_private(&path, text.as_bytes())
+}
+
+#[tauri::command]
+fn github_status(app: AppHandle) -> bool {
+    std::fs::read_to_string(github_token_file(&app)).map(|s| !s.trim().is_empty()).unwrap_or(false)
+}
+
+/// Save the token (empty = remove it) and add or remove GitHub's MCP server in claw's settings.
+#[tauri::command]
+fn github_set(app: AppHandle, token: String) -> Result<String, String> {
+    let t = token.trim();
+    let f = github_token_file(&app);
+    if t.is_empty() {
+        let _ = std::fs::remove_file(&f);
+        set_claw_github(None)?;
+        Ok("GitHub removed.".into())
+    } else {
+        if t.chars().any(char::is_whitespace) { return Err("that doesn't look like a token (it has spaces in it).".into()); }
+        write_private(&f, t.as_bytes())?;
+        set_claw_github(Some(t))?;
+        Ok("GitHub connected. claw can now use your repos, issues and pull requests.".into())
+    }
+}
+
+/// Open a web link in the default browser.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") { return Err("only https links".into()); }
+    #[cfg(windows)]
+    let r = no_window(Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url])).spawn();
+    #[cfg(not(windows))]
+    let r = Command::new("xdg-open").arg(&url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    r.map(|_| ()).map_err(|e| e.to_string())
+}
+
+// ---------- Speech to text: whisper.cpp on this PC (bundled whisper-cli + a small English model) ----------
+const WHISPER_MODEL: &str = "ggml-base.en-q5_1.bin";
+const WHISPER_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin";
+
+fn whisper_bin() -> PathBuf { exe_dir().join(if cfg!(windows) { "whisper-cli.exe" } else { "whisper-cli" }) }
+fn whisper_model(app: &AppHandle) -> PathBuf { data_dir(app).join("whisper").join(WHISPER_MODEL) }
+
+#[tauri::command]
+fn whisper_status(app: AppHandle) -> serde_json::Value {
+    json!({ "bin": whisper_bin().exists(), "model": whisper_model(&app).exists() })
+}
+
+/// Download the speech model once, emitting `whisper-dl` {done, total} and then `whisper-dl-done` {error}.
+#[tauri::command]
+fn whisper_download(app: AppHandle) {
+    std::thread::spawn(move || {
+        let dest = whisper_model(&app);
+        let res = (|| -> Result<(), String> {
+            if let Some(d) = dest.parent() { std::fs::create_dir_all(d).map_err(|e| e.to_string())?; }
+            let part = dest.with_extension("part");
+            let resp = ureq::get(WHISPER_URL).set("User-Agent", "TheClaww/0.3 (desktop)")
+                .timeout(std::time::Duration::from_secs(1800)).call().map_err(|e| e.to_string())?;
+            let total: u64 = resp.header("Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut r = resp.into_reader();
+            let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+            let mut buf = vec![0u8; 1 << 16];
+            let (mut done, mut last) = (0u64, 0u64);
+            loop {
+                let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+                if n == 0 { break; }
+                f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                done += n as u64;
+                if done - last > 1 << 20 { last = done; let _ = app.emit("whisper-dl", json!({ "done": done, "total": total })); }
+            }
+            drop(f);
+            if done < 1_000_000 { let _ = std::fs::remove_file(&part); return Err("the download was cut short".into()); }
+            std::fs::rename(&part, &dest).map_err(|e| e.to_string())
+        })();
+        let _ = app.emit("whisper-dl-done", json!({ "error": res.err() }));
+    });
+}
+
+/// Transcribe a 16 kHz mono WAV (base64) with whisper-cli and return the words.
+#[tauri::command]
+async fn transcribe(app: AppHandle, wav: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let bin = whisper_bin();
+        if !bin.exists() { return Err("speech to text isn't included in this build.".to_string()); }
+        let model = whisper_model(&app);
+        if !model.exists() { return Err("the speech model isn't downloaded yet.".to_string()); }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(wav).map_err(|e| e.to_string())?;
+        let tmp = data_dir(&app).join("whisper").join("recording.wav");
+        write_private(&tmp, &bytes)?;
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).to_string();
+        let mut c = Command::new(&bin);
+        c.arg("-m").arg(&model).arg("-f").arg(&tmp).args(["-nt", "-np", "-l", "en", "-t", threads.as_str()])
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = no_window(&mut c).output().map_err(|e| format!("couldn't run whisper: {e}"))?;
+        let _ = std::fs::remove_file(&tmp);
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+            return Err(format!("whisper failed ({})", if last.is_empty() { format!("exit code {}", out.status.code().unwrap_or(-1)) } else { last }));
+        }
+        let text = String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+        Ok(clean_transcript(&text))
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Drop whisper's non-speech tags like [BLANK_AUDIO] or (music).
+fn clean_transcript(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for ch in s.chars() {
+        match ch {
+            '[' | '(' => depth += 1,
+            ']' | ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Linux: let the page use the microphone (WebKitGTK denies it unless the app allows it).
+#[cfg(target_os = "linux")]
+fn allow_microphone(app: &tauri::App) {
+    use webkit2gtk::glib::prelude::Cast;
+    use webkit2gtk::{PermissionRequestExt, SettingsExt, UserMediaPermissionRequest, WebViewExt};
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.with_webview(|wv| {
+            let v = wv.inner();
+            if let Some(s) = WebViewExt::settings(&v) { s.set_enable_media_stream(true); s.set_enable_webaudio(true); }
+            v.connect_permission_request(|_, req| {
+                if req.downcast_ref::<UserMediaPermissionRequest>().is_some() { req.allow(); true } else { false }
+            });
+        });
+    }
+}
+
 fn main() {
     // Keep GPU rendering on by default (forcing DMA-BUF off pushed blur/video onto the CPU and spun fans).
     // `the-claww --safe-render` opts into the slower fallback for GPUs where WebKitGTK shows black or crashes.
@@ -297,7 +491,12 @@ fn main() {
     tauri::Builder::default()
         .manage(Jobs::default())
         .manage(Awake::default())
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, keep_awake])
+        .setup(|_app| {
+            #[cfg(target_os = "linux")]
+            allow_microphone(_app);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, keep_awake, github_status, github_set, open_url, whisper_status, whisper_download, transcribe])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }

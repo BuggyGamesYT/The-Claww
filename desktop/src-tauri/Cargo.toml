@@ -14,6 +14,10 @@ ureq = "2"
 base64 = "0.22"
 sysinfo = "0.30"
 
+# Linux: allow the microphone in the web view (speech to text).
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_38"] }
+
 [profile.release]
 strip = true
 lto = true

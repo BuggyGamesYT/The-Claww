@@ -218,3 +218,58 @@ html, body, #app { max-width: 100vw; overflow-x: hidden; }
   body.wide #chat > #home, body.wide #projSide { display: none; }
   .pane-head { padding-left: 10px; padding-right: 10px; }
 }
+
+/* Mic (speech to text): shown in place of send while the box is empty */
+.cbtn.mic { background: var(--surface2); }
+.cbtn.mic.rec { background: #e5484d; color: #fff; animation: claww-pulse 1.4s ease-in-out infinite; }
+.cbtn.mic.wait { opacity: .6; cursor: progress; animation: claww-pulse 1.4s ease-in-out infinite; }
+
+/* Models for tasks */
+.taskrow { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.taskrow span { flex: 0 0 38%; font-size: 14px; }
+.taskrow select { flex: 1; min-width: 0; padding: 8px 12px; }
+select.field option { background: var(--surface); color: var(--fg); }
+#sheet a { color: var(--accent); }
+
+/* ---- Small windows (a quarter tile of a 1280x800 screen is ~640x380): compact bars, everything still scrolls ---- */
+@media (max-height: 560px) {
+  #top { padding: 4px 10px 2px; gap: 8px; }
+  .round { width: 32px; height: 32px; border-radius: 16px; }
+  .round svg { width: 16px; height: 16px; }
+  #tabs { padding: 2px; }
+  #tabs button { padding: 4px clamp(8px, 2vw, 14px); font-size: 13px; }
+  .pane-head { padding-top: 0; padding-bottom: 2px; gap: 6px; }
+  .pane-title { font-size: 15px; }
+  .pane-head .chip { padding: 5px 10px; font-size: 12px; }
+  .searchbox { height: 30px; width: 30px; }
+  .msgs { padding-bottom: 6px; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 12px), transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 20px, #000 calc(100% - 12px), transparent 100%); }
+  .composer-wrap { padding-top: 2px; padding-bottom: 6px; }
+  .composer { border-radius: 22px; }
+  .bar { padding: 2px 2px 2px 0; gap: 4px; }
+  .bar textarea { min-height: 36px; padding: 7px 12px; max-height: 96px; }
+  .cbtn { width: 36px; height: 36px; border-radius: 18px; }
+  .cbtn svg { width: 15px; height: 15px; }
+  .stopsq { width: 14px; height: 14px; }
+  .thumb { width: 84px; height: 84px; }
+  .thumb.small { width: 48px; height: 48px; }
+  .pending { padding: 6px 8px 0; }
+  .card { padding: 12px 14px; border-radius: 18px; margin-bottom: 8px; }
+  #home, #projList, #projDetail { padding-top: 4px; padding-bottom: 16px; }
+  h1 { font-size: 20px; margin: 2px 4px 8px; }
+  #modal { padding: 8px; }
+  #sheet { max-height: calc(100vh - 16px); padding: 14px 16px; border-radius: 18px; }
+  .actions { margin-top: 10px; }
+  #models { padding-top: 8px; }
+  #models .search { padding: 8px 14px; margin: 6px 0; }
+}
+@media (max-width: 520px) {
+  #top { padding-left: 8px; padding-right: 8px; gap: 6px; }
+  #tabs button { padding: 5px 9px; font-size: 13px; }
+  .bubble, .suggest { max-width: 92%; }
+  .pane-head { padding-left: 6px; padding-right: 6px; }
+  .status span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status { min-width: 0; }
+  .taskrow span { flex-basis: 42%; font-size: 13px; }
+  .memrow .chip { font-size: 12px; padding: 7px 2px; }
+}

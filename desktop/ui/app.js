@@ -522,6 +522,7 @@ function thumb(a, small, onRemove) {
 
 // ---------- chat pane ----------
 const ARROW = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 16.6V1.4M1.4 8.6 9 1.4l7.6 7.2"/></svg>`;
+const MIC = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="1.4" width="6" height="9.6" rx="3"/><path d="M3 8.4a6 6 0 0 0 12 0M9 14.4v2.2"/></svg>`;
 const PLUS = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round"><path d="M9 1.4v15.2M1.4 9h15.2"/></svg>`;
 const ansi = /\u001B\[[0-9;?]*[ -\/]*[@-~]/g;
 const handlers = {};  // job id -> {out, done}
@@ -610,7 +611,115 @@ const Advisor = {
     return { task, switchTo, suggest };
   },
 };
+// ---------- per-task model picks ("Models for tasks" in Settings) ----------
+const TASKS = [["code", "Coding"], ["chat", "General chat"], ["reason", "Math"], ["vision", "Vision (photos/video)"], ["write", "Writing"]];
+const taskPick = task => (P.get("taskModels", {}) || {})[task] || "";
+function setTaskPick(task, name) { const m = P.get("taskModels", {}) || {}; if (name) m[task] = name; else delete m[task]; P.set("taskModels", m); }
+
+// ---------- photo/video context budget ----------
+// Memory (num_ctx) for a photo or video chat: the Memory setting, or when it's Auto a roomier 16K (8K on smaller PCs).
+const visionCtx = () => P.get("ctxLen", 0) || ((SYS ? SYS.memTotal / 1e9 : 8) >= 12 ? 16384 : 8192);
+// How many video frames and how big, so every image fits in that memory with room for the reply.
+function visionPlan(ctx, nImages, nVideos, textChars) {
+  const frames = ctx >= 16384 ? 6 : ctx >= 8192 ? 4 : 3;
+  const count = Math.max(1, nImages + nVideos * frames);
+  const budget = Math.max(600, ctx * 0.55 - textChars / 3.5);
+  // About one token per 28x28 pixel patch; 2.5x margin because models count image tokens differently.
+  const side = Math.floor(28 * Math.sqrt(budget / count / 2.5));
+  return { frames, imgMax: Math.max(224, Math.min(1024, side)), vidMax: Math.max(224, Math.min(768, side)) };
+}
+// "request (4304 tokens) exceeds the available context size (4096 tokens)" -> plain words and what to do.
+function friendlyError(err) {
+  const e = String(err || "");
+  if (!/exceeds the available context|context size|context length|context window|too many tokens/i.test(e)) return null;
+  const nums = e.match(/\((\d+) tokens\)[^(]*\((\d+) tokens\)/);
+  return "That was more than the model can hold in its memory" + (nums ? ` (it needed ${nums[1]} tokens, ${nums[2]} were available)` : "") +
+    ". Open Settings and set Memory to 16K or 32K (bigger uses more RAM), then send it again.";
+}
+
 async function installedModels() { try { return (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).map(m => m.name); } catch { return null; } }
+
+// ---------- Speech to text: record in the window, transcribe on this PC with whisper.cpp ----------
+const Speech = {
+  state: "idle", pane: null, stream: null, ctx: null, node: null, src: null, chunks: [], rate: 48000,
+  set(st, note) { this.state = st; if (this.pane) { this.pane.input.placeholder = note || this.pane.placeholder; this.pane.updateBtns(); } },
+  fail(msg) { const p = this.pane; this.cleanup(); this.set("idle"); this.pane = null; if (p) p.updateBtns(); modal("Speech to text", h("div", {}, msg)); },
+  async toggle(pane) {
+    if (this.state === "rec" && this.pane === pane) return this.stop();
+    if (this.state !== "idle") return;
+    this.pane = pane;
+    try {
+      const st = await invoke("whisper_status");
+      if (!st.bin) return this.fail("Speech to text isn't included in this build of The Claww.");
+      if (!st.model) await this.download();
+      await this.start();
+    } catch (e) { this.fail(String(e && e.message || e)); }
+  },
+  download() {
+    this.set("dl", "Getting the speech model (first time only)…");
+    return new Promise((res, rej) => {
+      const offs = [];
+      const done = err => { offs.forEach(f => f.then(u => u())); err ? rej("Couldn't download the speech model: " + err) : res(); };
+      offs.push(T.event.listen("whisper-dl", e => { const p = e.payload; if (p.total) this.set("dl", `Getting the speech model (first time only)… ${Math.round(p.done * 100 / p.total)}%`); }));
+      offs.push(T.event.listen("whisper-dl-done", e => done(e.payload.error)));
+      invoke("whisper_download").catch(err => done(String(err)));
+    });
+  },
+  async start() {
+    if (!navigator.mediaDevices?.getUserMedia) throw "This window can't reach the microphone.";
+    try { this.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }); }
+    catch (e) { throw "The microphone isn't available (" + (e && e.name || e) + "). Check that one is plugged in and that apps may use it."; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC(); this.rate = this.ctx.sampleRate; this.chunks = [];
+    this.src = this.ctx.createMediaStreamSource(this.stream);
+    this.node = this.ctx.createScriptProcessor(4096, 1, 1);
+    this.node.onaudioprocess = e => { if (this.state === "rec") this.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+    this.src.connect(this.node); this.node.connect(this.ctx.destination);
+    if (this.ctx.state === "suspended") await this.ctx.resume().catch(() => {});
+    this.set("rec", "Listening… click the mic again to stop");
+  },
+  cleanup() {
+    try { this.src && this.src.disconnect(); this.node && this.node.disconnect(); } catch {}
+    try { this.stream && this.stream.getTracks().forEach(t => t.stop()); } catch {}
+    try { this.ctx && this.ctx.close(); } catch {}
+    this.src = this.node = this.stream = this.ctx = null;
+  },
+  async stop() {
+    const pane = this.pane, chunks = this.chunks, rate = this.rate;
+    this.set("busy", "Turning your words into text…"); this.cleanup(); this.chunks = [];
+    try {
+      const pcm = resample16k(chunks, rate);
+      if (pcm.length < 16000 * 0.3) throw "That was too short. Click the mic, speak, then click it again.";
+      const text = await invoke("transcribe", { wav: wavB64(pcm) });
+      this.set("idle"); this.pane = null; pane.updateBtns();
+      if (text) pane.insertText(text); else modal("Speech to text", h("div", {}, "No words were heard. Try again a little closer to the mic."));
+    } catch (e) { this.pane = pane; this.fail(String(e && e.message || e)); }
+  },
+};
+function resample16k(chunks, rate) {
+  const n = chunks.reduce((a, c) => a + c.length, 0), src = new Float32Array(n); let o = 0;
+  chunks.forEach(c => { src.set(c, o); o += c.length; });
+  if (rate === 16000) return src;
+  const k = rate / 16000, out = new Float32Array(Math.floor(n / k));
+  for (let i = 0; i < out.length; i++) {
+    // Average the source samples this output sample covers (simple low-pass), so 48 kHz audio doesn't alias.
+    const a = Math.floor(i * k), b = Math.min(n, Math.max(a + 1, Math.floor((i + 1) * k))); let s = 0;
+    for (let j = a; j < b; j++) s += src[j];
+    out[i] = s / (b - a);
+  }
+  return out;
+}
+function wavB64(pcm) {
+  const buf = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(buf);
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE"); str(12, "fmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 16000, true); v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) { const x = Math.max(-1, Math.min(1, pcm[i])); v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true); }
+  const u = new Uint8Array(buf); let bin = "";
+  for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
 
 function ChatPane(root, projectMode) {
   const self = {};
@@ -683,11 +792,24 @@ function ChatPane(root, projectMode) {
   const picker = h("input", { type: "file", multiple: "", class: "hidden" });
   const plus = h("button", { class: "cbtn plus", title: "Attach photos, videos or files", onclick: () => picker.click() }); plus.innerHTML = PLUS;
   const sendBtn = h("button", { class: "cbtn send", title: "Send", style: "color:var(--on-accent)", onclick: () => self.send() });
-  const setBusy = b => { busy = b; sendBtn.innerHTML = b ? `<div class="stopsq"></div>` : ARROW; sendBtn.title = b ? "Stop" : "Send"; };
+  // Mic sits where the send arrow is while the box is empty; typing (or attaching) swaps it back to send.
+  const micBtn = h("button", { class: "cbtn mic", title: "Speak instead of typing", onclick: () => Speech.toggle(self) }); micBtn.innerHTML = MIC;
+  const updateBtns = () => {
+    const mine = Speech.pane === self && Speech.state !== "idle";
+    const showMic = mine || (!busy && !input.value.trim() && !pending.length);
+    micBtn.classList.toggle("hidden", !showMic); sendBtn.classList.toggle("hidden", showMic);
+    micBtn.classList.toggle("rec", mine && Speech.state === "rec");
+    micBtn.classList.toggle("wait", mine && Speech.state !== "rec");
+  };
+  const setBusy = b => { busy = b; sendBtn.innerHTML = b ? `<div class="stopsq"></div>` : ARROW; sendBtn.title = b ? "Stop" : "Send"; updateBtns(); };
   setBusy(false);
-  root.append(h("div", { class: "pane" }, head, whoRow, list, results, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, sendBtn)), picker)));
+  root.append(h("div", { class: "pane" }, head, whoRow, list, results, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, micBtn, sendBtn)), picker)));
   self.input = input;
-  input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(160, input.scrollHeight) + "px"; });
+  self.updateBtns = updateBtns;
+  self.placeholder = input.placeholder;
+  // Words from speech go into the box (after anything already typed).
+  self.insertText = t => { t = (t || "").trim(); if (!t) return; input.value = (input.value.trim() ? input.value.replace(/\s*$/, " ") : "") + t; input.dispatchEvent(new Event("input")); input.focus(); };
+  input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(160, input.scrollHeight) + "px"; updateBtns(); });
   // Up/Down recall your earlier messages in this chat (terminal-style). Only when the caret is on the first/last line, so multi-line editing still works.
   let hist = null, histDraft = "";
   const recall = t => { input.value = t; input.dispatchEvent(new Event("input")); const n = t.length; input.setSelectionRange(n, n); };
@@ -725,7 +847,7 @@ function ChatPane(root, projectMode) {
     } catch (e) { modal("Couldn't attach", h("div", {}, String(e))); }
   }
   function renderPending() {
-    pend.innerHTML = ""; pend.classList.toggle("hidden", !pending.length);
+    pend.innerHTML = ""; pend.classList.toggle("hidden", !pending.length); updateBtns();
     pending.forEach(a => pend.append(thumb(a, true, () => { pending = pending.filter(x => x !== a); renderPending(); })));
   }
   function bubble(text, user, atts = [], stoppedNote = false) {
@@ -763,7 +885,7 @@ function ChatPane(root, projectMode) {
     if (busy) { stopped = true; if (job) invoke("stop", { id: job }); return; }
     const text = input.value.trim(), atts = pending.slice();
     if (!text && !atts.length) return;
-    input.value = ""; input.style.height = "auto"; pending = []; renderPending();
+    input.value = ""; input.style.height = "auto"; pending = []; renderPending(); updateBtns();
     if (!projectMode && !atts.length) {
       const m = text.match(/^(?:please\s+)?(?:can you\s+)?(?:create|make|start|add|new)\s+(?:a\s+|me\s+a\s+)?(?:new\s+)?project(?:\s+(?:called|named|for))?\s*[:\-]?\s*(.*)$/i);
       if (m) {
@@ -787,8 +909,16 @@ function ChatPane(root, projectMode) {
     const visualPre = atts.some(a => a.mime.startsWith("image/") || a.mime.startsWith("video/"));
     let runModel = S.model, adv = null;
     const inst = await installedModels();
-    if (inst) adv = Advisor.advise(Advisor.task(text, visualPre, atts.map(a => a.name)), inst, S.model, SYS ? SYS.memTotal / 1e9 : 8, 0.75);
-    if (adv && adv.switchTo && P.get("autoSwitch", false)) { runModel = adv.switchTo; out.parentNode.insertBefore(h("div", { class: "muted", style: "font-size:12px;margin:0 0 4px 6px" }, `Using ${runModel} for ${Advisor.LABEL[adv.task]}`), out); }
+    const task = Advisor.task(text, visualPre, atts.map(a => a.name));
+    // A model picked for this kind of task in Settings wins; "Auto" keeps the right-model-for-the-task logic.
+    const pick = taskPick(task);
+    const picked = pick && (!inst || inst.some(n => normName(n) === normName(pick))) ? pick : null;
+    const usingNote = m => out.parentNode.insertBefore(h("div", { class: "muted", style: "font-size:12px;margin:0 0 4px 6px" }, `Using ${m} for ${Advisor.LABEL[task]}`), out);
+    if (picked) { runModel = picked; if (normName(picked) !== normName(S.model)) usingNote(runModel); }
+    else {
+      if (inst) adv = Advisor.advise(task, inst, S.model, SYS ? SYS.memTotal / 1e9 : 8, 0.75);
+      if (adv && adv.switchTo && P.get("autoSwitch", false)) { runModel = adv.switchTo; usingNote(runModel); }
+    }
     const show = () => { out.textContent = acc.trim() || "…"; list.scrollTop = list.scrollHeight; };
     const finish = () => {
       delete handlers[job]; job = null;
@@ -802,29 +932,33 @@ function ChatPane(root, projectMode) {
     try {
       if (visual.length) {
         const images = []; let notes = "";
+        const ctx = visionCtx();
+        const hist = []; let histChars = 0;
+        for (const m of prior.slice(-20).reverse()) { if (!m.t) continue; if (histChars + m.t.length > ctx * 0.25 * 3.5) break; histChars += m.t.length; hist.unshift(m); }
+        const plan = visionPlan(ctx, visual.filter(a => a.mime.startsWith("image/")).length, visual.filter(a => !a.mime.startsWith("image/")).length, histChars + text.length);
         for (const a of visual) {
           const url = await blobUrl(a);
-          if (a.mime.startsWith("image/")) { const b = await imgToJpegB64(url); if (b) images.push(b); }
-          else { const f = await videoFramesB64(url); images.push(...f); notes += `\n(The video "${a.name}" is shown as ${f.length} frames in time order.)`; }
+          if (a.mime.startsWith("image/")) { const b = await imgToJpegB64(url, plan.imgMax); if (b) images.push(b); }
+          else { const f = await videoFramesB64(url, plan.frames, plan.vidMax); images.push(...f); notes += `\n(The video "${a.name}" is shown as ${f.length} frames in time order.)`; }
         }
         for (const a of atts.filter(x => !visual.includes(x)))
           notes += isText(a.name, a.mime) ? `\n\nAttached file ${a.name}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 20000 })}\n\`\`\`` : `\n(Also attached: ${a.name}, ${a.mime})`;
         const messages = [];
         const pre = preamble(); if (pre) messages.push({ role: "system", content: pre.trim() });
-        prior.slice(-20).forEach(m => m.t && messages.push({ role: m.u ? "user" : "assistant", content: m.t }));
+        hist.forEach(m => messages.push({ role: m.u ? "user" : "assistant", content: m.t }));
         messages.push({ role: "user", content: (text || "What's in this?") + notes, images });
         handlers[job] = {
           out: line => {
             try {
               const j = JSON.parse(line);
-              if (j.error) acc += /image|vision|multimodal/i.test(j.error) ? `${runModel} can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:7b or llava, then try again.\n(${j.error})` : `Ollama error: ${j.error}`;
+              if (j.error) acc += friendlyError(j.error) || (/image|vision|multimodal/i.test(j.error) ? `${runModel} can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:7b or llava, then try again.\n(${j.error})` : `Ollama error: ${j.error}`);
               else acc += j.message?.content || "";
               show();
             } catch {}
           },
           done: p => { if (p.error && !stopped && !acc) { acc = `Couldn't reach Ollama: ${p.error}`; show(); } finish(); },
         };
-        await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: runModel, stream: true, messages }), event: "chat-line" });
+        await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: runModel, stream: true, messages, options: { num_ctx: ctx } }), event: "chat-line" });
       } else {
         let files = "";
         for (const a of atts) {
@@ -845,6 +979,7 @@ function ChatPane(root, projectMode) {
           done: p => {
             out.classList.remove("thinking");
             acc = stopped ? "" : clawReply(raw.replace(/^.*CLAW_TOOL \{.*$/gm, "").replace(ansi, ""));
+            if (!stopped && /exceeds the available context size/i.test(acc)) acc = friendlyError(acc) || acc;
             if (!stopped && p.code !== 0 && !acc.trim()) acc = `claw stopped (code ${p.code}). Is Ollama running and ${runModel} downloaded?`;
             show(); finish();
           },
@@ -900,6 +1035,45 @@ function memorySection(hostNow) {
   paint();
   return [lbl("Memory · how much of the chat and web pages the model can hold"), row, note, st];
 }
+// "Models for tasks": pick an installed model per kind of task, or Auto.
+function taskModelsSection() {
+  const box = h("div", { class: "taskrows" });
+  const render = names => {
+    box.innerHTML = "";
+    TASKS.forEach(([k, label]) => {
+      const cur = taskPick(k);
+      const sel = h("select", { class: "field" });
+      sel.append(h("option", { value: "" }, "Auto"));
+      const opts = [...new Set([...(names || []), ...(cur ? [cur] : [])])];
+      opts.forEach(n => sel.append(h("option", { value: n }, n + (names && !names.some(x => normName(x) === normName(n)) ? " (not installed)" : ""))));
+      sel.value = cur;
+      sel.onchange = () => setTaskPick(k, sel.value);
+      box.append(h("div", { class: "taskrow" }, h("span", {}, label), sel));
+    });
+  };
+  render(null);
+  return { els: [lbl("Models for tasks · Auto picks the right model for the task"), box,
+    h("div", { class: "muted", style: "margin-top:6px" }, "When a message is about one of these, claw uses the model you pick here.")], render };
+}
+// GitHub: a personal access token lets claw work with your repos, issues and pull requests (GitHub's MCP server).
+function githubSection() {
+  const st = h("div", { class: "muted", style: "margin-top:6px" }), msg = h("div", { class: "muted", style: "margin-top:4px" });
+  const f = h("input", { class: "field", type: "password", placeholder: "Paste a GitHub personal access token", autocomplete: "off", spellcheck: "false" });
+  const paint = async () => { const on = await invoke("github_status").catch(() => false); st.textContent = on ? "Connected · claw can use GitHub." : "Not connected."; clr.classList.toggle("hidden", !on); };
+  const run = async token => {
+    msg.style.color = ""; msg.textContent = "Saving…";
+    try { msg.textContent = await invoke("github_set", { token }); f.value = ""; }
+    catch (e) { msg.style.color = "#eb5a50"; msg.textContent = "Couldn't save: " + e; }
+    paint();
+  };
+  const save = h("button", { class: "chip", onclick: () => { if (f.value.trim()) run(f.value.trim()); } }, "Save");
+  const clr = h("button", { class: "chip hidden", onclick: () => run("") }, "Remove");
+  f.addEventListener("keydown", e => { if (e.key === "Enter" && f.value.trim()) run(f.value.trim()); });
+  const link = h("a", { href: "#", onclick: e => { e.preventDefault(); invoke("open_url", { url: "https://github.com/settings/tokens" }).catch(() => {}); } }, "github.com/settings/tokens");
+  paint();
+  return [lbl("GitHub"), h("div", { class: "row" }, h("div", { class: "grow" }, f), save, clr), st, msg,
+    h("div", { class: "muted", style: "margin-top:6px" }, "Make a token at ", link, " with the repo and workflow scopes. It stays on this PC, readable only by you.")];
+}
 function openSettings() {
   const host = h("input", { class: "field", placeholder: "http://127.0.0.1:11434" }); host.value = S.host;
   const model = h("input", { class: "field", placeholder: "llama3.2:3b" }); model.value = S.model;
@@ -921,7 +1095,8 @@ function openSettings() {
     : ram >= 12 ? `This PC has ${ram.toFixed(0)} GB RAM: 7–8B models like qwen2.5-coder:7b or llama3.1:8b run well.`
     : `Best with 1–3B models like llama3.2:3b or qwen2.5-coder:1.5b.`) + " To show it photos or videos, use a vision model like gemma3:4b or qwen2.5vl:7b.";
   const save = () => { P.set("host", host.value.trim() || "http://127.0.0.1:11434"); P.set("model", model.value.trim() || "llama3.2:3b"); pollStatus(); };
-  const refresh = async () => { try { instList = (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).sort((a, b) => a.name.localeCompare(b.name)); } catch { instList = null; } renderInst(); };
+  const tasks = taskModelsSection();
+  const refresh = async () => { try { instList = (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).sort((a, b) => a.name.localeCompare(b.name)); } catch { instList = null; } renderInst(); tasks.render(instList && instList.map(x => x.name)); };
   const pull = h("button", { class: "btn-accent", style: "margin:12px 0 4px", onclick: async () => {
     save(); prog.classList.remove("hidden"); pull.disabled = true; const id = uid();
     handlers[id] = {
@@ -933,9 +1108,11 @@ function openSettings() {
   const body = h("div", {}, lbl("Ollama address"), host, lbl("Model in use"), model, lbl("Installed models · click one to use it"), mq, installed,
     lbl("Right model for the task"), toggle("Auto-switch to a good installed model for each task (coding, photos, math, writing)", "autoSwitch", false),
     toggle("Suggest a better model to download when one would do the task better", "suggestModels", true, v => { if (v) P.set("noSuggest", []); }), h("div", { class: "muted", style: "margin-top:8px" }, tip),
+    ...tasks.els,
     ...memorySection(() => host.value.trim() || S.host), pull, prog, pst,
     h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama", { ctxLen: P.get("ctxLen", 0) }).then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
-    h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"));
+    h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"),
+    ...githubSection());
   modal("Settings", body, [["Done", save, true]]);
   refresh();
 }

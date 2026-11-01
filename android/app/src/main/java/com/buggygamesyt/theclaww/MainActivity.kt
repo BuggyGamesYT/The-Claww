@@ -503,7 +503,7 @@ class MainActivity : Activity() {
         projFrame = FrameLayout(this)
         projFrame.addView(ScrollView(this).apply { addView(projList); isFillViewport = true }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         projFrame.addView(ScrollView(this).apply { addView(projDetail); isFillViewport = true }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        // Project chat layer: on tablets in landscape a Hark-style sidebar lists every project (and the open one's chats).
+        // Project chat layer: on tablets in landscape a sidebar lists every project (and the open one's chats).
         projSide = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(8), dp(24)) }
         projSideWrap = ScrollView(this).apply { addView(projSide); isFillViewport = true; visibility = if (wide) View.VISIBLE else View.GONE }
         projFrame.addView(LinearLayout(this).apply {
@@ -673,6 +673,11 @@ class MainActivity : Activity() {
         private val pending = mutableListOf<Att>()
         val input: EditText
         private val sendArrow = Glyph(this@MainActivity, "up", t.onAccent)
+        private lateinit var sendBtnView: View
+        private lateinit var micBtn: FrameLayout
+        private val micGlyph = Glyph(this@MainActivity, "mic", fg)
+        private val micStop = View(this@MainActivity).apply { background = round(Color.WHITE, 3); visibility = View.GONE }
+        private var hintText = ""
         private val stopSquare = View(this@MainActivity).apply { background = round(t.onAccent, 4); visibility = View.GONE }
         private var proc: Process? = null
         /** Model this reply runs on: the chosen model, or a better installed one when auto-switch is on. */
@@ -804,13 +809,29 @@ class MainActivity : Activity() {
                 addView(stopSquare, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
                 setOnClickListener { onSend() }
             }
+            sendBtnView = sendBtn
+            // Mic sits where the send arrow is while the box is empty; typing (or attaching) swaps it back to send.
+            micBtn = FrameLayout(this@MainActivity).apply {
+                background = round(surface2, 22)
+                addView(micGlyph, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
+                addView(micStop, FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER))
+                contentDescription = "Speak instead of typing"
+                setOnClickListener { micTapped(this@ChatPane) }
+            }
             val bar = LinearLayout(this@MainActivity).apply {
                 gravity = Gravity.BOTTOM
                 setPadding(0, dp(4), dp(4), dp(4))
                 addView(input, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                 addView(plusBtn, LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(6) })
+                addView(micBtn, LinearLayout.LayoutParams(dp(44), dp(44)))
                 addView(sendBtn, LinearLayout.LayoutParams(dp(44), dp(44)))
             }
+            hintText = input.hint?.toString() ?: ""
+            input.addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(e: android.text.Editable?) { updateBtns() }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
             // Pill: attachment previews on top, input row below; button sits 4dp from the pill edge.
             val composer = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL; background = panel(26)
@@ -827,6 +848,32 @@ class MainActivity : Activity() {
             root.addView(resultsScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             root.addView(wrap, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             sub.text = statusLine; subDot.background = round(statusColor, 4)
+            updateBtns()
+        }
+
+        /** Shows the mic while the box is empty (and while speech is in progress here), otherwise send/stop. */
+        fun updateBtns() {
+            if (!::micBtn.isInitialized) return
+            val mine = speechPane === this && speechState != "idle"
+            val showMic = mine || (!busy && input.text.isBlank() && pending.isEmpty())
+            micBtn.visibility = if (showMic) View.VISIBLE else View.GONE
+            sendBtnView.visibility = if (showMic) View.GONE else View.VISIBLE
+            val rec = mine && (speechState == "rec" || speechState == "sys")
+            micBtn.background = round(if (rec) Color.rgb(229, 72, 77) else surface2, 22)
+            micGlyph.visibility = if (rec) View.GONE else View.VISIBLE
+            micStop.visibility = if (rec) View.VISIBLE else View.GONE
+            micBtn.alpha = if (mine && !rec) 0.6f else 1f
+        }
+
+        /** While speech is busy the box shows what's happening; null puts the normal hint back. */
+        fun speechHint(s: String?) { input.hint = s ?: hintText }
+
+        /** Words from speech go into the box, after anything already typed. */
+        fun insertText(t: String) {
+            val w = t.trim(); if (w.isEmpty()) return
+            val cur = input.text.toString()
+            val v = if (cur.isBlank()) w else cur.trimEnd() + " " + w
+            input.setText(v); input.setSelection(v.length); input.requestFocus()
         }
 
         private val project get() = Store.project(conv.project)
@@ -998,6 +1045,7 @@ class MainActivity : Activity() {
                 }, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.TOP or Gravity.END).apply { topMargin = dp(3); rightMargin = dp(3) })
                 attRow.addView(tile, LinearLayout.LayoutParams(dp(64), dp(64)).apply { rightMargin = dp(8) })
             }
+            updateBtns()
         }
 
         private fun bubble(s: String, user: Boolean, atts: List<String>): TextView {
@@ -1045,6 +1093,7 @@ class MainActivity : Activity() {
             busy = b
             sendArrow.visibility = if (b) View.GONE else View.VISIBLE
             stopSquare.visibility = if (b) View.VISIBLE else View.GONE
+            updateBtns()
         }
 
         fun workDir(): File =
@@ -1112,15 +1161,17 @@ class MainActivity : Activity() {
                         } else { out.setTextColor(bubbleFg(false)); out.background = bubbleBg(false) }
                         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
                     } }
-                // Model advice: auto-switch to a better installed model, and/or suggest a better one to download.
+                // A model picked for this kind of task in Settings wins; "Auto" keeps the right-model-for-the-task logic:
+                // auto-switch to a better installed model, and/or suggest a better one to download.
                 runModel = model
-                val adv = installedModels()?.let { inst ->
-                    Advisor.advise(Advisor.task(msg, visual.isNotEmpty(), atts.map { it.name }), inst, model, ramBytes() / 1e9, 0.6)
-                }
-                if (adv?.switchTo != null && prefs.getBoolean("autoSwitch", false)) {
-                    runModel = adv.switchTo
-                    runOnUiThread { outCol.addView(text("Using ${adv.switchTo} for ${Advisor.LABEL[adv.task]}", 12f, muted).apply { setPadding(dp(6), 0, 0, dp(4)) }, 0) }
-                }
+                val inst = installedModels()
+                val task = Advisor.task(msg, visual.isNotEmpty(), atts.map { it.name })
+                val pick = prefs.getString("taskModel_$task", "") ?: ""
+                val picked = pick.takeIf { it.isNotBlank() && (inst == null || inst.any { n -> norm(n) == norm(it) }) }
+                fun usingNote(m: String) = runOnUiThread { outCol.addView(text("Using $m for ${Advisor.LABEL[task]}", 12f, muted).apply { setPadding(dp(6), 0, 0, dp(4)) }, 0) }
+                val adv = if (picked != null) null else inst?.let { Advisor.advise(task, it, model, ramBytes() / 1e9, 0.6) }
+                if (picked != null) { runModel = picked; if (norm(picked) != norm(model)) usingNote(picked) }
+                else if (adv?.switchTo != null && prefs.getBoolean("autoSwitch", false)) { runModel = adv.switchTo; usingNote(adv.switchTo) }
                 try {
                     if (visual.isNotEmpty()) visionChat(prior, msg, atts, visual, sb, ::show)
                     else clawChat(prior, msg, atts, sb, ::show)
@@ -1211,7 +1262,8 @@ class MainActivity : Activity() {
             }
             val code = p.waitFor()
             sb.setLength(0)
-            if (!stopped) sb.append(ToolSteps.reply(raw.toString().replace(ansi, "")))
+            if (!stopped) sb.append(ToolSteps.reply(raw.toString().replace(ansi, "")).let { r ->
+                if (r.contains("exceeds the available context size", true)) VisionCtx.friendly(r) ?: r else r })
             if (!stopped && code != 0 && sb.isBlank()) sb.append("claw stopped (code $code). Is a model downloaded?")
             show()
         }
@@ -1220,10 +1272,15 @@ class MainActivity : Activity() {
         private fun visionChat(prior: List<Msg>, msg: String, atts: List<Att>, visual: List<Att>, sb: StringBuilder, show: () -> Unit) {
             val images = JSONArray()
             var notes = ""
+            // Fit every picture and frame in the model's memory (the error was "request exceeds the available context size").
+            val numCtx = VisionCtx.ctx(prefs.getInt("ctxLen", 0), ramBytes() / 1e9)
+            val histMsgs = ArrayList<Msg>(); var histChars = 0
+            for (m in prior.takeLast(20).asReversed()) { if (m.text.isBlank()) continue; if (histChars + m.text.length > numCtx * 0.25 * 3.5) break; histChars += m.text.length; histMsgs.add(0, m) }
+            val plan = VisionCtx.plan(numCtx, visual.count { it.mime.startsWith("image/") }, visual.count { !it.mime.startsWith("image/") }, histChars + msg.length)
             visual.forEach { a ->
-                if (a.mime.startsWith("image/")) loadScaled(a.path, 1024)?.let { images.put(b64(it)) }
+                if (a.mime.startsWith("image/")) loadScaled(a.path, plan.imgMax)?.let { images.put(b64(it)) }
                 else {
-                    val frames = videoFrames(a.path, 4)
+                    val frames = videoFrames(a.path, plan.frames, plan.vidMax)
                     frames.forEach { images.put(b64(it)) }
                     notes += "\n(The video \"${a.name}\" is shown as ${frames.size} frames in time order.)"
                 }
@@ -1236,26 +1293,120 @@ class MainActivity : Activity() {
             val messages = JSONArray()
             val pre = projectPreamble()
             if (pre.isNotEmpty()) messages.put(JSONObject().put("role", "system").put("content", pre.trim()))
-            prior.takeLast(20).forEach { m -> if (m.text.isNotBlank()) messages.put(JSONObject().put("role", if (m.user) "user" else "assistant").put("content", m.text)) }
+            histMsgs.forEach { m -> messages.put(JSONObject().put("role", if (m.user) "user" else "assistant").put("content", m.text)) }
             messages.put(JSONObject().put("role", "user").put("content", msg.ifEmpty { "What's in this?" } + notes).put("images", images))
             val c = URL("$host/api/chat").openConnection() as HttpURLConnection
             cancel = { try { c.disconnect() } catch (_: Exception) {} }
             c.requestMethod = "POST"; c.doOutput = true; c.setRequestProperty("Content-Type", "application/json")
             c.connectTimeout = 5000; c.readTimeout = 600000
-            c.outputStream.use { it.write(JSONObject().put("model", runModel).put("stream", true).put("messages", messages).toString().toByteArray()) }
+            c.outputStream.use { it.write(JSONObject().put("model", runModel).put("stream", true).put("messages", messages)
+                .put("options", JSONObject().put("num_ctx", numCtx)).toString().toByteArray()) }
             val stream = if (c.responseCode >= 400) c.errorStream else c.inputStream
             stream.bufferedReader().forEachLine { line ->
                 if (line.isBlank()) return@forEachLine
                 val j = try { JSONObject(line) } catch (_: Exception) { return@forEachLine }
                 if (j.has("error")) {
                     val err = j.getString("error")
-                    sb.append(if (err.contains("image", true) || err.contains("vision", true) || err.contains("multimodal", true))
+                    sb.append(VisionCtx.friendly(err) ?: if (err.contains("image", true) || err.contains("vision", true) || err.contains("multimodal", true))
                         "$runModel can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:3b or llava-phi3, then try again.\n($err)"
                         else "Ollama error: $err")
                 } else sb.append(j.optJSONObject("message")?.optString("content") ?: "")
                 show()
             }
         }
+    }
+
+    // ===================== Speech to text =====================
+    private val speech by lazy { Speech(this) }
+    /** idle · dl (getting the model) · rec (listening) · busy (transcribing) · sys (system speech service) */
+    private var speechState = "idle"
+    private var speechPane: ChatPane? = null
+    private var micWaitingPane: ChatPane? = null
+
+    private fun setSpeech(state: String, pane: ChatPane?, hint: String? = null) {
+        val old = speechPane
+        speechState = state; speechPane = if (state == "idle") null else pane
+        old?.let { it.speechHint(null); it.updateBtns() }
+        pane?.let { it.speechHint(if (state == "idle") null else hint); it.updateBtns() }
+    }
+
+    private fun speechFailed(pane: ChatPane?, msg: String) {
+        setSpeech("idle", pane)
+        AlertDialog.Builder(this, dialogStyle).setTitle("Speech to text").setMessage(msg.replaceFirstChar { it.uppercase() })
+            .setPositiveButton("OK", null).show()
+    }
+
+    private fun micTapped(pane: ChatPane) {
+        if (speechPane === pane) when (speechState) {
+            "rec" -> { stopRecording(pane); return }
+            "sys" -> { speech.stopSystem(); return }
+            else -> return
+        }
+        if (speechState != "idle") return
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            micWaitingPane = pane
+            requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), 91)
+            return
+        }
+        startSpeech(pane)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != 91) return
+        val pane = micWaitingPane ?: return
+        micWaitingPane = null
+        if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) startSpeech(pane)
+        else speechFailed(pane, "the microphone permission is needed to turn your speech into text. You can allow it in Android's app settings for The Claww.")
+    }
+
+    private fun startSpeech(pane: ChatPane) {
+        if (!speech.whisperAvailable()) {
+            if (speech.systemAvailable()) startSystemSpeech(pane)
+            else speechFailed(pane, "speech to text isn't included in this build, and there's no speech service on this phone.")
+            return
+        }
+        val first = !speech.modelFile.exists()
+        setSpeech(if (first) "dl" else "busy", pane, if (first) "Getting the speech model (first time only)…" else "Starting the mic…")
+        thread {
+            try {
+                if (first) runOnUiThread { android.widget.Toast.makeText(this, "Downloading the speech model once (about 60 MB). It stays on this device.", android.widget.Toast.LENGTH_LONG).show() }
+                speech.ensureModel { pct -> runOnUiThread { if (speechPane === pane) pane.speechHint("Getting the speech model (first time only)… " + (if (pct >= 0) "$pct%" else "")) } }
+                speech.start()
+                runOnUiThread { setSpeech("rec", pane, "Listening… tap the mic again to stop") }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    // No model and no way to get it: use the phone's speech service if there is one.
+                    if (speech.modelFile.exists() || !speech.systemAvailable()) speechFailed(pane, "couldn't start speech to text: ${e.message}")
+                    else { setSpeech("idle", pane); startSystemSpeech(pane) }
+                }
+            }
+        }
+    }
+
+    private fun stopRecording(pane: ChatPane) {
+        setSpeech("busy", pane, "Turning your words into text…")
+        thread {
+            try {
+                val text = speech.transcribe(speech.stop())
+                runOnUiThread {
+                    setSpeech("idle", pane)
+                    if (text.isBlank()) android.widget.Toast.makeText(this, "No words were heard. Try again a little closer to the mic.", android.widget.Toast.LENGTH_SHORT).show()
+                    else pane.insertText(text)
+                }
+            } catch (e: Exception) { runOnUiThread { speechFailed(pane, e.message ?: "speech to text failed") } }
+        }
+    }
+
+    private fun startSystemSpeech(pane: ChatPane) {
+        setSpeech("sys", pane, "Listening… tap the mic again to stop")
+        try {
+            speech.startSystem { text, err ->
+                runOnUiThread {
+                    if (err != null) speechFailed(pane, err) else { setSpeech("idle", pane); if (!text.isNullOrBlank()) pane.insertText(text) }
+                }
+            }
+        } catch (e: Exception) { speechFailed(pane, "the speech service couldn't start: ${e.message}") }
     }
 
     // ===================== Attachments =====================
@@ -1309,14 +1460,14 @@ class MainActivity : Activity() {
         }
     } catch (_: Exception) { null }
 
-    private fun videoFrames(path: String, n: Int): List<Bitmap> {
+    private fun videoFrames(path: String, n: Int, max: Int = 768): List<Bitmap> {
         val r = MediaMetadataRetriever()
         return try {
             r.setDataSource(path)
             val dur = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
             (1..n).mapNotNull { k ->
                 r.getFrameAtTime(dur * 1000 * k / (n + 1), MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.let { b ->
-                    val s = minOf(1f, 768f / maxOf(b.width, b.height))
+                    val s = minOf(1f, max.toFloat() / maxOf(b.width, b.height))
                     if (s < 1f) Bitmap.createScaledBitmap(b, (b.width * s).toInt(), (b.height * s).toInt(), true) else b
                 }
             }
@@ -1510,6 +1661,33 @@ class MainActivity : Activity() {
                   else "This device has ${"%.0f".format(ramGb)} GB RAM: best with 1–3B models like llama3.2:3b, qwen2.5-coder:1.5b, gemma3:1b.") +
                   "\nTo show it photos or videos, use a vision model like gemma3:4b or qwen2.5vl:3b."
         box.addView(TextView(this).apply { text = tip; setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(10)) })
+        // Models for tasks: an installed model per kind of task, or Auto (the right-model-for-the-task logic above).
+        box.addView(label("Models for tasks · Auto picks the right model for the task"))
+        val taskRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun renderTasks() {
+            taskRows.removeAllViews()
+            listOf("code" to "Coding", "chat" to "General chat", "reason" to "Math", "vision" to "Vision (photos/video)", "write" to "Writing").forEach { (k, l) ->
+                val cur = prefs.getString("taskModel_$k", "") ?: ""
+                taskRows.addView(LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL; background = round(surface2, 12); setPadding(dp(14), dp(10), dp(12), dp(10))
+                    addView(TextView(this@MainActivity).apply { text = l; setTextColor(fg); textSize = 14f }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                    addView(TextView(this@MainActivity).apply {
+                        text = cur.ifEmpty { "Auto" }; setTextColor(if (cur.isEmpty()) muted else accent); textSize = 13f; maxLines = 1
+                        ellipsize = android.text.TextUtils.TruncateAt.MIDDLE; gravity = Gravity.END
+                    }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.2f))
+                    setOnClickListener {
+                        val names = listOf("Auto") + (allModels ?: emptyList())
+                        AlertDialog.Builder(this@MainActivity, dialogStyle).setTitle("Model for ${l.lowercase()}")
+                            .setItems(names.toTypedArray()) { _, i -> prefs.edit().putString("taskModel_$k", if (i == 0) "" else names[i]).apply(); renderTasks() }
+                            .setNegativeButton("Cancel", null).show()
+                        if (allModels == null) android.widget.Toast.makeText(this@MainActivity, "Ollama isn't reachable yet, so only Auto is listed.", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(6) })
+            }
+        }
+        renderTasks()
+        box.addView(taskRows)
+        box.addView(TextView(this).apply { text = "When a message is about one of these, claw uses the model you pick here."; setTextColor(muted); textSize = 12f; setPadding(0, dp(2), 0, dp(10)) })
         // Memory (context length) for the built-in Ollama.
         box.addView(label("Memory · how much of the chat and web pages the model can hold"))
         val memOpts = listOf(0 to "Auto", 8192 to "8K", 16384 to "16K", 32768 to "32K", 65536 to "64K", 131072 to "128K")
@@ -1545,6 +1723,38 @@ class MainActivity : Activity() {
             setOnClickListener { settingsDialog?.dismiss(); openModels() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)).apply { topMargin = dp(8) })
         box.addView(progress); box.addView(pullStatus)
+        // GitHub: a personal access token lets claw work with your repos, issues and pull requests (GitHub's MCP server).
+        box.addView(label("GitHub"))
+        val ghStatus = TextView(this).apply { setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, 0) }
+        val ghField = field("", "Paste a GitHub personal access token").apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val ghRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        lateinit var ghRemove: TextView
+        fun paintGh() { val on = GitHubMcp.has(this); ghStatus.text = if (on) "Connected · claw can use GitHub." else "Not connected."; ghRemove.visibility = if (on) View.VISIBLE else View.GONE }
+        fun ghSave(token: String?) {
+            try { GitHubMcp.set(this, token); ghField.setText(""); hideKeyboard()
+                android.widget.Toast.makeText(this, if (token.isNullOrBlank()) "GitHub removed" else "GitHub connected", android.widget.Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) { android.widget.Toast.makeText(this, "Couldn't save: ${e.message}", android.widget.Toast.LENGTH_LONG).show() }
+            paintGh()
+        }
+        ghRow.addView(ghField, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        ghRow.addView(chip("Save") { ghField.text.toString().trim().takeIf { it.isNotEmpty() }?.let { ghSave(it) } }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
+        ghRemove = chip("Remove") { ghSave(null) }
+        ghRow.addView(ghRemove, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
+        box.addView(ghRow); box.addView(ghStatus)
+        box.addView(TextView(this).apply {
+            val link = "github.com/settings/tokens"
+            val full = "Make a token at $link with the repo and workflow scopes. It's stored encrypted on this device."
+            text = android.text.SpannableString(full).apply {
+                val i = full.indexOf(link)
+                setSpan(android.text.style.ForegroundColorSpan(accent), i, i + link.length, 0)
+                setSpan(android.text.style.UnderlineSpan(), i, i + link.length, 0)
+            }
+            setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(10))
+            setOnClickListener { try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/settings/tokens"))) } catch (_: Exception) {} }
+        })
+        paintGh()
         fun save() {
             prefs.edit().putBoolean("builtin", sw.isChecked).putString("host", hostF.text.toString().trim())
                 .putString("model", modelF.text.toString().trim()).apply()
@@ -1555,7 +1765,7 @@ class MainActivity : Activity() {
                 val a = JSONObject(URL("$host/api/tags").readText()).getJSONArray("models")
                 (0 until a.length()).map { a.getJSONObject(it).getString("name") }.sorted()
             } catch (e: Exception) { null }
-            runOnUiThread { allModels = l; renderModels() }
+            runOnUiThread { allModels = l; renderModels(); renderTasks() }
         }
         pull.setOnClickListener {
             save(); progress.visibility = View.VISIBLE; pull.isEnabled = false
@@ -2062,6 +2272,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         alive = false
+        if (speech.recording) try { speech.stop() } catch (_: Exception) {}
         if (::chatPane.isInitialized) chatPane.kill()
         if (::projPane.isInitialized) projPane.kill()
         if (isFinishing) { ollama?.destroy(); ollama = null; stopService(Intent(this, ClawService::class.java)) }

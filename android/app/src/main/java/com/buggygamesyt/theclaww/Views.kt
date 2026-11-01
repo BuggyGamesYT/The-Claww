@@ -34,6 +34,12 @@ class Glyph(ctx: Context, private val kind: String, color: Int) : View(ctx) {
             "close" -> { c.drawLine(i, i, w - i, h - i, p); c.drawLine(w - i, i, i, h - i, p) }
             "chevup" -> c.drawPath(Path().apply { moveTo(i, h * 0.68f); lineTo(w / 2, h * 0.3f); lineTo(w - i, h * 0.68f) }, p)
             "chevdown" -> c.drawPath(Path().apply { moveTo(i, h * 0.32f); lineTo(w / 2, h * 0.7f); lineTo(w - i, h * 0.32f) }, p)
+            "mic" -> {
+                p.strokeWidth = w * 0.12f; val k = p.strokeWidth / 2
+                c.drawRoundRect(android.graphics.RectF(w * 0.33f, k, w * 0.67f, h * 0.6f), w * 0.17f, w * 0.17f, p)
+                c.drawArc(android.graphics.RectF(w * 0.16f, h * 0.22f, w * 0.84f, h * 0.8f), 0f, 180f, false, p)
+                c.drawLine(w / 2, h * 0.8f, w / 2, h - k, p)
+            }
         }
     }
 }

@@ -17,6 +17,9 @@ on:
         required: false
         default: ""
 
+env:
+  WHISPER_REF: v1.9.5
+
 jobs:
   build:
     name: desktop-${{ matrix.name }}
@@ -54,6 +57,23 @@ jobs:
           EXT=""; [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
           mkdir -p ../desktop/src-tauri/binaries
           cp "target/release/claw$EXT" "../desktop/src-tauri/binaries/claw-$TRIPLE$EXT"
+      - uses: actions/checkout@v4
+        with: { repository: ggml-org/whisper.cpp, ref: "${{ env.WHISPER_REF }}", path: whisper }
+      - name: Build whisper-cli (speech to text sidecar)
+        shell: bash
+        working-directory: whisper
+        run: |
+          # Portable x86-64 build (AVX2 baseline, no -march=native), static so it runs next to the app on its own.
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF \
+            -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_OPENMP=OFF \
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build build --config Release --target whisper-cli --parallel 4
+          TRIPLE=$(rustc -vV | sed -n 's/host: //p')
+          EXT=""; [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
+          BIN=$(find build -type f -name "whisper-cli$EXT" | head -1)
+          echo "built $BIN"
+          cp "$BIN" "../desktop/src-tauri/binaries/whisper-cli-$TRIPLE$EXT"
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - name: Build app
@@ -95,8 +115,10 @@ jobs:
     steps:
       - name: Arch build deps
         run: |
-          pacman -Syu --noconfirm --needed git rust nodejs npm webkit2gtk-4.1 gtk3 librsvg openssl github-cli
+          pacman -Syu --noconfirm --needed git rust nodejs npm webkit2gtk-4.1 gtk3 librsvg openssl github-cli cmake
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: ggml-org/whisper.cpp, ref: "${{ env.WHISPER_REF }}", path: whisper }
       - name: Build claw + app
         shell: bash
         run: |
@@ -105,6 +127,11 @@ jobs:
           TRIPLE=$(rustc -vV | sed -n 's/host: //p')
           mkdir -p desktop/src-tauri/binaries
           cp rust/target/release/claw "desktop/src-tauri/binaries/claw-$TRIPLE"
+          (cd whisper && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF -DWHISPER_SDL2=OFF -DWHISPER_CURL=OFF \
+            -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_OPENMP=OFF \
+            && cmake --build build --target whisper-cli --parallel 4)
+          cp whisper/build/bin/whisper-cli "desktop/src-tauri/binaries/whisper-cli-$TRIPLE"
           cd desktop
           npm install --no-audit --no-fund
           npx tauri icon app-icon.png
@@ -115,7 +142,7 @@ jobs:
           ver=$(sed -n 's/^version = "\(.*\)"/\1/p' desktop/src-tauri/Cargo.toml | head -1)
           useradd -m builder
           P=/home/builder/pkg; mkdir -p $P
-          cp desktop/src-tauri/target/release/the-claww rust/target/release/claw desktop/src-tauri/icons/128x128.png $P/
+          cp desktop/src-tauri/target/release/the-claww rust/target/release/claw whisper/build/bin/whisper-cli desktop/src-tauri/icons/128x128.png $P/
           cat > $P/the-claww.desktop <<'DESK'
           [Desktop Entry]
           Name=The Claww
@@ -136,13 +163,14 @@ jobs:
           url="https://github.com/BuggyGamesYT/The-Claww"
           license=(MIT)
           depends=(webkit2gtk-4.1 gtk3 openssl)
-          optdepends=('ollama: run models on this PC')
+          optdepends=('ollama: run models on this PC' 'gst-plugins-good: microphone for speech to text' 'gst-plugin-pipewire: microphone on PipeWire')
           options=(!debug !strip)
-          source=(the-claww claw the-claww.desktop 128x128.png)
-          sha256sums=(SKIP SKIP SKIP SKIP)
+          source=(the-claww claw whisper-cli the-claww.desktop 128x128.png)
+          sha256sums=(SKIP SKIP SKIP SKIP SKIP)
           package() {
             install -Dm755 the-claww "\$pkgdir/usr/lib/the-claww/the-claww"
             install -Dm755 claw "\$pkgdir/usr/lib/the-claww/claw"
+            install -Dm755 whisper-cli "\$pkgdir/usr/lib/the-claww/whisper-cli"
             install -dm755 "\$pkgdir/usr/bin"
             ln -s /usr/lib/the-claww/the-claww "\$pkgdir/usr/bin/the-claww"
             install -Dm644 the-claww.desktop "\$pkgdir/usr/share/applications/the-claww.desktop"

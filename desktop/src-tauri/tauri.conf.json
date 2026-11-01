@@ -14,8 +14,8 @@
         "title": "The Claww",
         "width": 1280,
         "height": 840,
-        "minWidth": 420,
-        "minHeight": 560,
+        "minWidth": 360,
+        "minHeight": 300,
         "maximized": true,
         "center": true
       }
@@ -41,7 +41,8 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/claw"
+      "binaries/claw",
+      "binaries/whisper-cli"
     ],
     "category": "DeveloperTool",
     "shortDescription": "Local AI agent with Ollama",
