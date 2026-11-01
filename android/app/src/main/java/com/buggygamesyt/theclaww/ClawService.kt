@@ -39,6 +39,7 @@ class ClawService : Service() {
             wake = (getSystemService(POWER_SERVICE) as PowerManager)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "claww:ollama").apply { setReferenceCounted(false); acquire() }
         }
+        Catalog.startWatcher(this)
         return START_STICKY
     }
 

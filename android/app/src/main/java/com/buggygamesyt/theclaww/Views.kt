@@ -61,6 +61,7 @@ class Pager(ctx: Context) : FrameLayout(ctx) {
             v.translationX = i * w - pos
             v.visibility = if (abs(i * w - pos) < w) View.VISIBLE else View.INVISIBLE
         }
+        Backdrop.changed()
     }
 
     fun go(i: Int, animate: Boolean = true) {
@@ -154,6 +155,11 @@ class AnimatedWall(ctx: Context, private val kind: String, private val bg: Int, 
     override fun onDraw(c: Canvas) {
         val w = width.toFloat(); val h = height.toFloat()
         val s = (System.nanoTime() - start) / 1e9f
+        scene(c, w, h, s)
+        if (Backdrop.active) Backdrop.render(width, height) { scene(it, w, h, s) }
+    }
+
+    private fun scene(c: Canvas, w: Float, h: Float, s: Float) {
         c.drawColor(bg)
         when (kind) {
             "stars" -> {
@@ -233,5 +239,10 @@ class VideoWall(ctx: Context, private val uri: android.net.Uri) : android.view.T
     }
     override fun onSurfaceTextureSizeChanged(st: android.graphics.SurfaceTexture, w: Int, h: Int) { mp?.let { crop(it.videoWidth, it.videoHeight) } }
     override fun onSurfaceTextureDestroyed(st: android.graphics.SurfaceTexture): Boolean { try { mp?.release() } catch (_: Exception) {}; mp = null; return true }
-    override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) {}
+    private var lastGrab = 0L
+    override fun onSurfaceTextureUpdated(st: android.graphics.SurfaceTexture) {
+        if (!Backdrop.active) return
+        val now = System.nanoTime(); if (now - lastGrab < 33_000_000L) return; lastGrab = now
+        try { Backdrop.ensure(width, height)?.let { getBitmap(it); Backdrop.changed() } } catch (_: Exception) {}
+    }
 }

@@ -189,6 +189,7 @@ class MainActivity : Activity() {
         try { if (Build.VERSION.SDK_INT >= 26) startForegroundService(Intent(this, ClawService::class.java)) } catch (_: Exception) {}
         if (builtIn) startOllama()
         pollStatus()
+        if (intent?.action == "models") openModels()
     }
 
     /** Material You: palette taken from the system's wallpaper-based dynamic colors (Android 12+), following dark/light mode. */
@@ -229,6 +230,8 @@ class MainActivity : Activity() {
 
     // ---------- Glass & bubble opacity ----------
     private val glassOn get() = prefs.getBoolean("glass", false)
+    /** "Liquid" = refracting lens glass (Android 13+); "Frosted" = the original translucent tint look. */
+    private val liquidOn get() = glassOn && prefs.getString("glassStyle", "Liquid") == "Liquid" && LiquidGlass.supported
     private val glassTints get() = listOf(
         "Clear" to Color.WHITE, "Theme" to t.accent, "Blue" to Color.rgb(90, 160, 255), "Mint" to Color.rgb(80, 220, 180),
         "Pink" to Color.rgb(255, 120, 190), "Violet" to Color.rgb(170, 120, 255), "Amber" to Color.rgb(255, 190, 80), "Smoke" to Color.rgb(20, 20, 24), "Custom" to prefs.getInt("glassCustom", Color.rgb(120, 200, 255)))
@@ -238,6 +241,7 @@ class MainActivity : Activity() {
     /** Liquid glass: translucent tint, a soft top sheen and a bright hairline rim. */
     private fun glass(r: Int, tint: Int, strength: Int = prefs.getInt("glassStrength", 30)): android.graphics.drawable.Drawable {
         val rad = dp(r).toFloat()
+        if (liquidOn && Build.VERSION.SDK_INT >= 33) return LiquidGlass(rad, tint, strength / 100f * 0.5f, resources.displayMetrics.density)
         val fill = GradientDrawable().apply { setColor(withAlpha(tint, 20 + strength * 2)); cornerRadius = rad }
         val sheen = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(withAlpha(Color.WHITE, 60), withAlpha(Color.WHITE, 8), withAlpha(Color.WHITE, 0))).apply { cornerRadius = rad }
         val rim = GradientDrawable().apply { setColor(Color.TRANSPARENT); cornerRadius = rad; setStroke(dp(1), withAlpha(Color.WHITE, 90)) }
@@ -1058,6 +1062,7 @@ class MainActivity : Activity() {
     }
 
     // ===================== Settings =====================
+    private var settingsDialog: AlertDialog? = null
     private fun openSettings() {
         val pad = dp(20)
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, dp(8)); setBackgroundColor(t.surface) }
@@ -1084,6 +1089,10 @@ class MainActivity : Activity() {
                   "\nTo show it photos or videos, use a vision model like gemma3:4b or qwen2.5vl:3b."
         box.addView(TextView(this).apply { text = tip; setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(10)) })
         box.addView(pull, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)))
+        box.addView(Button(this).apply {
+            text = "Browse & download any model"; setTextColor(fg); background = round(surface2, 12); isAllCaps = false
+            setOnClickListener { settingsDialog?.dismiss(); openModels() }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)).apply { topMargin = dp(8) })
         box.addView(progress); box.addView(pullStatus)
         box.addView(label("Installed models")); box.addView(models)
         fun save() {
@@ -1124,10 +1133,243 @@ class MainActivity : Activity() {
             }
         }
         refreshModels()
-        AlertDialog.Builder(this, dialogStyle)
+        settingsDialog = AlertDialog.Builder(this, dialogStyle)
             .setTitle("Settings").setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("Done") { _, _ -> save() }
             .show()
+    }
+
+
+    // ===================== Model browser =====================
+    private fun ramBytes(): Long = android.app.ActivityManager.MemoryInfo().also { (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).getMemoryInfo(it) }.totalMem
+    private fun fit(bytes: Long): Pair<String, Int> {
+        if (bytes <= 0) return "" to muted
+        val r = bytes * 1.2 / ramBytes()
+        return when { r < 0.6 -> "Fits" to Color.rgb(80, 200, 120); r < 0.85 -> "Tight fit" to Color.rgb(240, 180, 60); else -> "Too big" to Color.rgb(235, 90, 80) }
+    }
+    private fun norm(n: String) = n.lowercase().let { if (it.substringAfterLast('/').contains(':')) it else "$it:latest" }
+
+    /** Browse every free model (Ollama library + all GGUF models on Hugging Face), newest first, with search, picks and a multi-select download queue. */
+    private fun openModels() {
+        val dlg = android.app.Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
+        var source = prefs.getString("modelSource", "all")!!; var newest = prefs.getBoolean("modelNewest", true)
+        var query = ""; var page = 0; var gen = 0
+        val selected = LinkedHashMap<String, Long>()
+        var installed = setOf<String>()
+        val newSet = prefs.getStringSet("newModels", emptySet())!!.toSet()
+        prefs.edit().putStringSet("newModels", emptySet()).apply()
+
+        val rootV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(t.bg); setPadding(dp(16), dp(14), dp(16), dp(10)) }
+        fun tv(s: String, size: Float, c: Int = fg, bold: Boolean = false) = TextView(this).apply { text = s; textSize = size; setTextColor(c); if (bold) typeface = Typeface.DEFAULT_BOLD }
+        val head = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        head.addView(tv("‹", 26f).apply { setPadding(dp(4), 0, dp(14), 0); setOnClickListener { dlg.dismiss() } })
+        head.addView(tv("Models", 22f, fg, true), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        head.addView(tv("RAM ${"%.0f".format(ramBytes() / 1e9)} GB", 12f, muted))
+        rootV.addView(head)
+        val search = EditText(this).apply {
+            hint = "Search every model: qwen, llama, coder, vision…"; setTextColor(fg); setHintTextColor(muted); setSingleLine()
+            background = round(surface2, 22); setPadding(dp(16), dp(11), dp(16), dp(11)); imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        }
+        rootV.addView(search, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) })
+        val filters = LinearLayout(this)
+        rootV.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(filters); setPadding(0, dp(8), 0, dp(4)) })
+
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(this).apply { addView(list) }
+        rootV.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        val dlBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val picks = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val statusV = tv("", 13f, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(12), 0, dp(12)) }
+        val more = tv("Load more", 14f, accent, true).apply { gravity = Gravity.CENTER; setPadding(0, dp(14), 0, dp(20)); visibility = View.GONE }
+        list.addView(dlBox); list.addView(picks); list.addView(results); list.addView(statusV); list.addView(more)
+        val go = Button(this).apply { setTextColor(t.onAccent); background = round(accent, 22); isAllCaps = false; visibility = View.GONE }
+        rootV.addView(go, LinearLayout.LayoutParams(MATCH_PARENT, dp(48)).apply { topMargin = dp(8) })
+
+        fun updateGo() {
+            go.visibility = if (selected.isEmpty()) View.GONE else View.VISIBLE
+            go.text = "Download ${selected.size} model${if (selected.size == 1) "" else "s"} · ${Catalog.gb(selected.values.sum())}"
+        }
+        fun section(s: String) = tv(s.uppercase(), 11f, muted, true).apply { letterSpacing = 0.08f; setPadding(dp(4), dp(14), 0, dp(6)) }
+        fun badge(s: String, c: Int) = tv(s, 11f, c, true).apply { background = GradientDrawable().apply { setStroke(dp(1), c); cornerRadius = dp(8).toFloat() }; setPadding(dp(6), dp(1), dp(6), dp(1)) }
+
+        /** One downloadable row: name, size, fit and a select toggle (or Use, when already installed). */
+        fun variantRow(pull: String, label: String, bytes: Long, note: String): View {
+            val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(10), dp(9), dp(10), dp(9)) }
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(tv(label, 14f, fg, true))
+            val meta = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            if (bytes > 0) meta.addView(tv(Catalog.gb(bytes) + "  ", 12f, muted))
+            fit(bytes).let { (s, c) -> if (s.isNotEmpty()) meta.addView(badge(s, c)) }
+            if (note.isNotEmpty()) meta.addView(tv("  $note", 12f, muted))
+            col.addView(meta)
+            row.addView(col, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            val isInstalled = norm(pull) in installed
+            val btn = tv("", 13f, fg, true).apply { setPadding(dp(14), dp(7), dp(14), dp(7)) }
+            fun paint() {
+                when {
+                    isInstalled -> { btn.text = if (norm(model) == norm(pull)) "In use" else "Use"; btn.setTextColor(accent); btn.background = round(surface2, 16) }
+                    pull in selected -> { btn.text = "✓ Selected"; btn.setTextColor(t.onAccent); btn.background = round(accent, 16) }
+                    else -> { btn.text = "+ Select"; btn.setTextColor(fg); btn.background = round(surface2, 16) }
+                }
+            }
+            paint()
+            btn.setOnClickListener {
+                if (isInstalled) { prefs.edit().putString("model", pull).apply(); pollStatus(); android.widget.Toast.makeText(this, "Now using $pull", android.widget.Toast.LENGTH_SHORT).show(); paint(); return@setOnClickListener }
+                if (pull in selected) selected.remove(pull) else selected[pull] = bytes
+                paint(); updateGo()
+            }
+            row.addView(btn)
+            return row
+        }
+
+        fun entryCard(e: CatalogEntry): View {
+            val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = round(t.surface, 18); setPadding(dp(14), dp(12), dp(14), dp(12)) }
+            val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            top.addView(tv(e.title, 16f, fg, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            if ("${e.source}:${e.id}" in newSet) top.addView(badge("NEW", accent))
+            top.addView(tv("  " + if (e.source == "hf") "Hugging Face" else "Ollama", 11f, muted))
+            c.addView(top)
+            if (e.desc.isNotBlank()) c.addView(tv(e.desc, 13f, fg).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, dp(3), 0, 0) })
+            val info = listOf(Catalog.age(e.date), e.caps.joinToString(" · "), e.stat).filter { it.isNotBlank() }.joinToString("  ·  ")
+            c.addView(tv(info, 12f, muted).apply { setPadding(0, dp(4), 0, 0) })
+            val vbox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+            c.addView(vbox)
+            var loaded = false
+            c.setOnClickListener {
+                vbox.visibility = if (vbox.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                if (loaded) return@setOnClickListener
+                loaded = true
+                vbox.addView(tv("Loading sizes…", 12f, muted).apply { setPadding(0, dp(8), 0, 0) })
+                thread {
+                    val vs = try { Catalog.variants(e) } catch (ex: Exception) { null }
+                    runOnUiThread {
+                        vbox.removeAllViews()
+                        when {
+                            vs == null -> { loaded = false; vbox.addView(tv("Couldn't load. Tap to retry.", 12f, muted)) }
+                            vs.isEmpty() -> vbox.addView(tv("No downloadable builds (cloud-only or not GGUF).", 12f, muted))
+                            else -> vs.forEach { v -> vbox.addView(variantRow(v.pull, v.label, v.bytes, v.note)) }
+                        }
+                    }
+                }
+            }
+            return c.also { it.layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(10) } }
+        }
+
+        fun renderPicks() {
+            picks.removeAllViews()
+            if (query.isNotEmpty()) return
+            picks.addView(section("Suggested for this device"))
+            val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = round(t.surface, 18); setPadding(dp(4), dp(4), dp(4), dp(4)) }
+            val ramGb = ramBytes() / 1e9
+            Catalog.suggestions.filter { it.minRamGb <= ramGb + 0.5 && it.bytes * 1.2 < ramBytes() * 0.85 }.forEach { s ->
+                box.addView(variantRow(s.pull, s.pull, s.bytes, s.why))
+            }
+            picks.addView(box)
+        }
+
+        val dlListener: () -> Unit = {
+            dlBox.removeAllViews()
+            val jobs = synchronized(Downloads) { Downloads.jobs.toList() }
+            if (jobs.isNotEmpty()) {
+                val hdr = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                hdr.addView(section("Downloads · keep going with the screen off"), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                if (jobs.any { it.state in setOf("done", "failed", "cancelled") }) hdr.addView(tv("Clear", 12f, accent, true).apply { setPadding(dp(8), dp(10), dp(4), 0); setOnClickListener { Downloads.clearFinished() } })
+                dlBox.addView(hdr)
+                val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = round(t.surface, 18); setPadding(dp(14), dp(8), dp(14), dp(8)) }
+                jobs.forEach { j ->
+                    val r = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(6)) }
+                    val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                    col.addView(tv(j.pull, 14f, fg, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE })
+                    col.addView(tv(if (j.total > 0 && j.state == "running") "${Catalog.gb(j.done)} of ${Catalog.gb(j.total)} · ${j.status}" else j.status, 12f, muted))
+                    if (j.state == "running") col.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                        max = 100; isIndeterminate = j.total <= 0; if (j.total > 0) progress = (j.done * 100 / j.total).toInt() })
+                    r.addView(col, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                    if (j.state in setOf("queued", "running")) r.addView(tv("✕", 16f, muted).apply { setPadding(dp(12), dp(4), dp(4), dp(4)); setOnClickListener { Downloads.cancel(j.pull) } })
+                    box.addView(r)
+                }
+                dlBox.addView(box)
+            }
+        }
+
+        fun refreshInstalled(then: () -> Unit = {}) = thread {
+            val set = try {
+                val a = JSONObject(URL("$host/api/tags").readText()).getJSONArray("models")
+                (0 until a.length()).map { norm(a.getJSONObject(it).getString("name")) }.toSet()
+            } catch (_: Exception) { emptySet() }
+            runOnUiThread { installed = set; then() }
+        }
+
+        fun load(reset: Boolean) {
+            val g = ++gen
+            if (reset) { page = 0; results.removeAllViews(); renderPicks() } else page++
+            more.visibility = View.GONE; statusV.text = "Loading…"; statusV.visibility = View.VISIBLE
+            val q = query; val src = source; val nw = newest; val p = page
+            thread {
+                val got = mutableListOf<CatalogEntry>(); var hasMore = false; var err: String? = null
+                if (src != "hf") try { val (l, m) = Catalog.ollama(q, p, nw); got += l; hasMore = hasMore || m } catch (e: Exception) { err = e.message }
+                if (src != "ollama") try { val (l, m) = Catalog.hf(q, p, nw); got += l; hasMore = hasMore || m } catch (e: Exception) { err = e.message }
+                val sorted = if (nw) got.sortedByDescending { it.date } else got.sortedByDescending { it.downloads }
+                runOnUiThread {
+                    if (g != gen) return@runOnUiThread
+                    if (reset && sorted.isNotEmpty()) results.addView(section(if (q.isEmpty()) (if (nw) "Newest models" else "Most popular") else "Results for \"$q\""))
+                    sorted.forEach { results.addView(entryCard(it)) }
+                    statusV.visibility = if (sorted.isEmpty() && results.childCount == 0) View.VISIBLE else View.GONE
+                    statusV.text = if (err != null && sorted.isEmpty()) "Couldn't reach the model catalogs: $err" else "Nothing found. Try another word."
+                    more.visibility = if (hasMore) View.VISIBLE else View.GONE
+                }
+            }
+        }
+        more.setOnClickListener { load(false) }
+
+        fun renderFilters() {
+            filters.removeAllViews()
+            fun f(label: String, on: Boolean, click: () -> Unit) = filters.addView(chip(label, click).apply {
+                if (on) { background = round(accent, 16); setTextColor(t.onAccent) }
+                layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) }
+            })
+            f("Newest", newest) { newest = true; prefs.edit().putBoolean("modelNewest", true).apply(); renderFilters(); load(true) }
+            f("Popular", !newest) { newest = false; prefs.edit().putBoolean("modelNewest", false).apply(); renderFilters(); load(true) }
+            filters.addView(View(this), LinearLayout.LayoutParams(dp(10), 1))
+            listOf("all" to "All sources", "ollama" to "Ollama", "hf" to "Hugging Face").forEach { (k, l) ->
+                f(l, source == k) { source = k; prefs.edit().putString("modelSource", k).apply(); renderFilters(); load(true) }
+            }
+            val watch = prefs.getBoolean("watchModels", true)
+            f(if (watch) "🔔 New-model alerts on" else "🔕 New-model alerts off", false) {
+                prefs.edit().putBoolean("watchModels", !watch).apply(); renderFilters()
+            }
+        }
+
+        val debounce = android.os.Handler(mainLooper)
+        search.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(e: android.text.Editable?) {
+                debounce.removeCallbacksAndMessages(null)
+                debounce.postDelayed({ val q = e.toString().trim(); if (q != query) { query = q; load(true) } }, 450)
+            }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        go.setOnClickListener {
+            if (builtIn) startOllama()
+            Downloads.enqueue(this, host, selected.keys.toList())
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 7)
+            selected.clear(); updateGo(); scroll.smoothScrollTo(0, 0)
+        }
+        Downloads.listen(dlListener)
+        Downloads.onFinished = { refreshInstalled() }
+        dlg.setOnDismissListener { Downloads.unlisten(dlListener) }
+        renderFilters(); dlListener()
+        refreshInstalled { load(true) }
+        dlg.setContentView(rootV)
+        dlg.show()
+        // First open: remember what exists so later releases show up as NEW.
+        thread { try { if (prefs.getStringSet("seenModels", emptySet())!!.isEmpty()) Catalog.checkNew(this) } catch (_: Exception) {} }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == "models") openModels()
     }
 
     // ===================== Themes & wallpapers =====================
@@ -1143,12 +1385,24 @@ class MainActivity : Activity() {
     private fun applyWallpaper(root: FrameLayout) {
         val w = prefs.getString("wall", "None")
         val grad = wallpapers.firstOrNull { it.first == w }?.second
+        // Liquid glass samples a low-res copy of the wallpaper; static wallpapers paint it on layout.
+        Backdrop.reset()
+        var staticPaint: ((android.graphics.Canvas, Int, Int) -> Unit)? = { c, _, _ -> c.drawColor(t.bg) }
+        if (liquidOn) {
+            Backdrop.active = true; Backdrop.root = root
+            Backdrop.dimColor = t.bg; Backdrop.dimAlpha = if (w != "None") prefs.getInt("dim", 45) / 100f else 0f
+            root.viewTreeObserver.addOnScrollChangedListener { Backdrop.changed() }
+            root.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ -> staticPaint?.let { p -> Backdrop.render(v.width, v.height) { p(it, v.width, v.height) } } }
+        }
         if (grad != null) {
             root.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, grad)
+            staticPaint = { c, cw, ch -> GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, grad).apply { setBounds(0, 0, cw, ch); draw(c) } }
         } else if (animatedWalls().any { it.first == w }) {
+            staticPaint = null
             val (kind, wbg, cols) = animatedWalls().first { it.first == w }.second
             root.addView(AnimatedWall(this, kind, wbg, cols), FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         } else if (w == "Your video") {
+            staticPaint = null
             try { root.addView(VideoWall(this, Uri.parse(prefs.getString("wallVideo", ""))), FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) } catch (_: Exception) {}
         } else if (w == "Your photo") {
             try {
@@ -1160,6 +1414,11 @@ class MainActivity : Activity() {
                 val bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) }
                 root.addView(ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setImageBitmap(bmp) },
                     FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+                if (bmp != null) staticPaint = { c, cw, ch ->
+                    val sc = maxOf(cw.toFloat() / bmp.width, ch.toFloat() / bmp.height)
+                    val dw = bmp.width * sc; val dh = bmp.height * sc
+                    c.drawBitmap(bmp, null, android.graphics.RectF((cw - dw) / 2, (ch - dh) / 2, (cw + dw) / 2, (ch + dh) / 2), android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+                }
             } catch (_: Exception) { }
         }
         val blur = prefs.getInt("blur", 0)
@@ -1232,6 +1491,14 @@ class MainActivity : Activity() {
             text = "Glass bubbles, cards and bars"; setTextColor(fg); isChecked = glassOn
             setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("glass", on).apply(); dialog?.dismiss(); recreate() }
         })
+        box.addView(label("Glass style"))
+        box.addView(swatchRow(listOf(
+            "Liquid" to GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(withAlpha(Color.WHITE, 200), withAlpha(accent, 60), withAlpha(Color.WHITE, 140))),
+            "Frosted" to GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(withAlpha(Color.WHITE, 110), withAlpha(Color.WHITE, 40)))
+        ), prefs.getString("glassStyle", "Liquid")!!) { name ->
+            dialog?.dismiss(); prefs.edit().putString("glassStyle", name).putBoolean("glass", true).apply(); recreate()
+        })
+        if (!LiquidGlass.supported) box.addView(TextView(this).apply { text = "Liquid refraction needs Android 13+; Frosted is used here."; setTextColor(muted); textSize = 11f })
         box.addView(label("Glass tint"))
         box.addView(swatchRow(glassTints.map { (name, c) ->
             name to GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(withAlpha(c, 230), withAlpha(c, 90)))
