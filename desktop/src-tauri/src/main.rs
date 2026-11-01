@@ -129,7 +129,9 @@ fn http_stream(app: AppHandle, jobs: State<'_, Jobs>, id: String, url: String, b
     let flag = Arc::new(AtomicBool::new(false));
     jobs.flags.lock().unwrap().insert(id.clone(), flag.clone());
     std::thread::spawn(move || {
-        let res = ureq::post(&url).set("Content-Type", "application/json").timeout(std::time::Duration::from_secs(3600)).send_string(&body);
+        // A fresh connection every chat: a reused idle one that Ollama already closed fails with "Unexpected EOF".
+        let agent = ureq::AgentBuilder::new().max_idle_connections(0).build();
+        let res = agent.post(&url).set("Content-Type", "application/json").timeout(std::time::Duration::from_secs(3600)).send_string(&body);
         let mut error = None;
         match res {
             Ok(r) | Err(ureq::Error::Status(_, r)) => {

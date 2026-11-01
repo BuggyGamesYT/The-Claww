@@ -1288,7 +1288,7 @@ class MainActivity : Activity() {
 
         /** Direct chat with Ollama's /api/chat, streamed into the bubble: photos/videos (so a vision model can see them),
          *  models that can't use tools, and tasks with Tools switched off. */
-        private fun directChat(prior: List<Msg>, msg: String, atts: List<Att>, visual: List<Att>, sb: StringBuilder, show: () -> Unit, plain: Boolean = false) {
+        private fun directChat(prior: List<Msg>, msg: String, atts: List<Att>, visual: List<Att>, sb: StringBuilder, show: () -> Unit, plain: Boolean = false, ctxOverride: Int = 0, retried: Boolean = false) {
             sb.setLength(0); sb.append(ToolSteps.LIVE).append("Thinking…"); show()
             replyErr = false
             var got = false
@@ -1298,7 +1298,7 @@ class MainActivity : Activity() {
             // Memory budget: the biggest context that fits next to this model (4K when it's too big for the budget).
             val bud = budgetCtx(runModel)
             val ctxSet = if (bud > 0) bud else prefs.getInt("ctxLen", 0)
-            val numCtx = if (bud > 0) bud else if (visual.isNotEmpty()) VisionCtx.ctx(ctxSet, ramBytes() / 1e9) else if (ctxSet > 0) ctxSet else 4096
+            val numCtx = if (ctxOverride > 0) ctxOverride else if (bud > 0) bud else if (visual.isNotEmpty()) VisionCtx.ctx(ctxSet, ramBytes() / 1e9) else if (ctxSet > 0) ctxSet else 4096
             val histMsgs = ArrayList<Msg>(); var histChars = 0
             for (m in ChatGuards.clean(prior).takeLast(20).asReversed()) { if (m.text.isBlank()) continue; if (histChars + m.text.length > numCtx * 0.25 * 3.5) break; histChars += m.text.length; histMsgs.add(0, m) }
             val plan = VisionCtx.plan(numCtx, visual.count { it.mime.startsWith("image/") }, visual.count { !it.mime.startsWith("image/") }, histChars + msg.length)
@@ -1322,12 +1322,14 @@ class MainActivity : Activity() {
             if (images.length() > 0) um.put("images", images)
             messages.put(um)
             val c = URL("$host/api/chat").openConnection() as HttpURLConnection
+            c.setRequestProperty("Connection", "close")   // never reuse an idle connection Ollama already closed
             cancel = { try { c.disconnect() } catch (_: Exception) {} }
             c.requestMethod = "POST"; c.doOutput = true; c.setRequestProperty("Content-Type", "application/json")
             c.connectTimeout = 5000; c.readTimeout = 600000
             val req = JSONObject().put("model", runModel).put("stream", true).put("messages", messages)
-            if (visual.isNotEmpty() || ctxSet > 0) req.put("options", JSONObject().put("num_ctx", numCtx))
+            if (visual.isNotEmpty() || ctxSet > 0 || ctxOverride > 0) req.put("options", JSONObject().put("num_ctx", numCtx))
             if (budgetGb() > 0) req.put("keep_alive", "30m")
+            try {
             c.outputStream.use { it.write(req.toString().toByteArray()) }
             val stream = if (c.responseCode >= 400) c.errorStream else c.inputStream
             stream.bufferedReader().forEachLine { line ->
@@ -1343,6 +1345,16 @@ class MainActivity : Activity() {
                 } else sb.append(j.optJSONObject("message")?.optString("content") ?: "")
                 show()
             }
+            } catch (ex: java.io.IOException) {
+                // Ollama dropped the connection before answering (usually it crashed loading a model too big for memory,
+                // or a stale connection): make sure it's running, then try once more with half the memory. Same as desktop.
+                if (stopped || got) throw ex
+                if (!retried) {
+                    sb.setLength(0); sb.append(ToolSteps.LIVE).append("Ollama stopped, restarting it…"); show()
+                    if (ollamaBack()) { directChat(prior, msg, atts, visual, sb, show, plain, maxOf(4096, numCtx / 2), true); return }
+                }
+                sb.setLength(0); sb.append(ollamaCrashNote(runModel, retried)); replyErr = true; show(); return
+            }
             if (!got) { sb.setLength(0); show() }
             // The model wrote a tool call as text instead of answering: ask once more for plain words, then give up kindly.
             if (!stopped && ChatGuards.isToolCallText(sb.toString())) {
@@ -1351,6 +1363,19 @@ class MainActivity : Activity() {
             }
         }
     }
+
+    /** Wait for Ollama to answer again after it dropped a chat (starting the built-in one if it's down). Blocking. */
+    private fun ollamaBack(ms: Long = 20000): Boolean {
+        fun up() = try { (URL("$host/api/version").openConnection() as HttpURLConnection).run { connectTimeout = 1500; readTimeout = 1500; responseCode == 200 } } catch (_: Exception) { false }
+        if (up()) return true
+        // The built-in server crashed: clear the dead process so it starts fresh.
+        if (builtIn) { ollama?.let { o -> if (!o.isAlive) ollama = null }; runOnUiThread { try { startOllama() } catch (_: Exception) {} } }
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) { Thread.sleep(1000); if (up()) return true }
+        return false
+    }
+    private fun ollamaCrashNote(m: String, retried: Boolean) = "Ollama stopped while running $m" + (if (retried) ", even with less memory" else " and didn't come back") +
+        ". That almost always means the model plus your photos or video didn't fit in memory. Try a smaller model for this task in Settings › Models for tasks (like gemma3:4b or qwen2.5vl:3b), or lower Memory, then send it again."
 
     private val CLAW_OK = 0
     private val CLAW_NO_TOOLS = 1

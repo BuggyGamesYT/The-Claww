@@ -732,6 +732,17 @@ function friendlyError(err) {
     ". Open Settings and set Memory to 16K or 32K (bigger uses more RAM), then send it again.";
 }
 
+// Wait for Ollama to answer again after it dropped a chat (starting it if it's local and down). True when it's back.
+async function ollamaBack(ms = 20000) {
+  const up = async () => { try { await invoke("http_get", { url: S.host + "/api/version" }); return true; } catch { return false; } };
+  if (await up()) return true;
+  if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", ollamaEnv()).catch(() => {});
+  for (const end = Date.now() + ms; Date.now() < end;) { await new Promise(r => setTimeout(r, 1000)); if (await up()) return true; }
+  return false;
+}
+const ollamaCrashNote = (m, retried) => `Ollama stopped while running ${m}` + (retried ? ", even with less memory" : " and didn't come back") +
+  ". That almost always means the model plus your photos or video didn't fit in memory. Try a smaller model for this task in Settings › Models for tasks (like gemma3:4b or qwen2.5vl:3b), or lower Memory, then send it again.";
+
 async function installedModels() { try { return (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).map(m => m.name); } catch { return null; } }
 
 // ---------- What each model can do (Ollama /api/show "capabilities"), cached per model + digest ----------
@@ -1146,7 +1157,7 @@ function ChatPane(root, projectMode) {
       thinking(); let got = false;
       const bud = Budget.on() ? (await Caps.get(runModel), Budget.ctxFor(runModel)) : 0;
       const ctxSet = bud || P.get("ctxLen", 0);
-      const ctx = bud || (visual.length ? visionCtx() : (ctxSet || 4096));
+      const ctx = o.ctx || bud || (visual.length ? visionCtx() : (ctxSet || 4096));
       const hist = []; let histChars = 0;
       for (const m of cleanHistory(prior).slice(-20).reverse()) { if (!m.t) continue; if (histChars + m.t.length > ctx * 0.25 * 3.5) break; histChars += m.t.length; hist.unshift(m); }
       const images = []; let notes = "";
@@ -1173,7 +1184,7 @@ function ChatPane(root, projectMode) {
       const um2 = { role: "user", content: (text || (visual.length ? "What's in this?" : "Please look at the attached file(s).")) + notes };
       if (images.length) um2.images = images;
       messages.push(um2);
-      const opts = {}; if (visual.length || ctxSet) opts.num_ctx = ctx;
+      const opts = {}; if (visual.length || ctxSet || o.ctx) opts.num_ctx = ctx;
       const keep = Budget.on() ? { keep_alive: "30m" } : {};
       handlers[job] = {
         out: line => {
@@ -1192,6 +1203,20 @@ function ChatPane(root, projectMode) {
           if (!stopped && isToolCallText(acc)) {
             if (!o.plain) { delete handlers[job]; runDirect({ plain: true }).catch(e => { acc = "Error: " + e; show(); finish(); }); return; }
             acc = TOOLCALL_NOTE(runModel); am.e = true;
+          }
+          // Ollama dropped the connection before answering (usually it crashed loading a model too big for memory,
+          // or a stale connection): make sure it's running, then try once more with half the memory.
+          if (p.error && !stopped && !got) {
+            if (!o.retry) {
+              delete handlers[job];
+              (async () => {
+                acc = "Ollama stopped, restarting it…"; show();
+                if (await ollamaBack()) return runDirect({ ...o, retry: true, ctx: Math.max(4096, Math.floor(ctx / 2)) });
+                acc = ollamaCrashNote(runModel, false); am.e = true; show(); finish();
+              })().catch(e => { acc = "Error: " + e; am.e = true; show(); finish(); });
+              return;
+            }
+            acc = ollamaCrashNote(runModel, true); am.e = true;
           }
           if (p.error && !stopped && !acc) { acc = `Couldn't reach Ollama: ${p.error}`; am.e = true; }
           show(); finish();
