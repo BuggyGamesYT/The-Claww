@@ -734,6 +734,38 @@ function friendlyError(err) {
 
 async function installedModels() { try { return (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).map(m => m.name); } catch { return null; } }
 
+// ---------- What each model can do (Ollama /api/show "capabilities"), cached per model + digest ----------
+// claw always sends tool definitions, so a model without "tools" (e.g. gemma3) gets a direct Ollama chat instead.
+const Caps = {
+  cache: P.get("modelCaps", {}),   // normName -> {digest, tools, vision}
+  digests: {}, at: 0,
+  async refreshDigests(force) {
+    if (!force && Date.now() - this.at < 15000) return;
+    try { (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).forEach(m => this.digests[normName(m.name)] = m.digest || ""); this.at = Date.now(); } catch {}
+  },
+  known(name) { const c = this.cache[normName(name)]; return c && (this.digests[normName(name)] === undefined || c.digest === this.digests[normName(name)]) ? c : null; },
+  async get(name) {
+    if (!name) return null;
+    await this.refreshDigests();
+    const k = normName(name), hit = this.known(name); if (hit) return hit;
+    try {
+      const j = JSON.parse(await invoke("http_post", { url: S.host + "/api/show", body: JSON.stringify({ model: name }), timeoutMs: 6000 }));
+      const caps = Array.isArray(j.capabilities) ? j.capabilities : null;
+      // Older Ollama has no capabilities list: assume tools work (the error fallback still catches it).
+      const c = { digest: this.digests[k] || "", tools: caps ? caps.includes("tools") : true, vision: caps ? caps.includes("vision") : null };
+      this.cache[k] = c; P.set("modelCaps", this.cache); return c;
+    } catch { return null; }
+  },
+  markNoTools(name) { const k = normName(name); this.cache[k] = { ...(this.cache[k] || { digest: this.digests[k] || "" }), tools: false }; P.set("modelCaps", this.cache); },
+  noTools(name) { const c = this.known(name); return !!(c && c.tools === false); },
+};
+// The "Tools" switch per task row in Settings (default on). Off = always the direct chat for that task.
+const taskTools = task => (P.get("taskTools", {}) || {})[task] !== false;
+function setTaskTools(task, on) { const m = P.get("taskTools", {}) || {}; if (on) delete m[task]; else m[task] = false; P.set("taskTools", m); }
+
+// How claw talks when it chats with a model directly (no tools): same voice as the app's claw.
+const DIRECT_PERSONA = "You are claw, a helpful AI assistant running locally on the user's own computer through Ollama. Answer clearly and concisely. You can't browse the web, open files or run commands in this chat; if the user asks for that, say so briefly and suggest turning Tools on (or picking a model that supports tools) in Settings › Models for tasks.";
+
 // ---------- Speech to text: record in the window, transcribe on this PC with whisper.cpp ----------
 const Speech = {
   state: "idle", pane: null, stream: null, ctx: null, node: null, src: null, chunks: [], rate: 48000,
@@ -1032,13 +1064,21 @@ function ChatPane(root, projectMode) {
       if (adv && adv.suggest && !stopped) suggestCard(out, adv);
     };
     const visual = atts.filter(a => a.mime.startsWith("image/") || a.mime.startsWith("video/"));
-    job = uid();
-    try {
+    // Photos/videos, a model that can't use tools, or Tools switched off for this task: chat with Ollama directly.
+    // Everything else goes through claw (web search, files, commands).
+    const caps = await Caps.get(runModel);
+    const noTools = (caps && caps.tools === false) || !taskTools(task);
+    const thinking = () => { acc = "Thinking…"; show(); out.classList.add("thinking"); };
+    // Direct chat with Ollama /api/chat, streamed into the bubble.
+    const runDirect = async () => {
+      job = uid();
+      thinking(); let got = false;
+      const ctxSet = P.get("ctxLen", 0);
+      const ctx = visual.length ? visionCtx() : (ctxSet || 4096);
+      const hist = []; let histChars = 0;
+      for (const m of prior.slice(-20).reverse()) { if (!m.t) continue; if (histChars + m.t.length > ctx * 0.25 * 3.5) break; histChars += m.t.length; hist.unshift(m); }
+      const images = []; let notes = "";
       if (visual.length) {
-        const images = []; let notes = "";
-        const ctx = visionCtx();
-        const hist = []; let histChars = 0;
-        for (const m of prior.slice(-20).reverse()) { if (!m.t) continue; if (histChars + m.t.length > ctx * 0.25 * 3.5) break; histChars += m.t.length; hist.unshift(m); }
         const plan = visionPlan(ctx, visual.filter(a => a.mime.startsWith("image/")).length, visual.filter(a => !a.mime.startsWith("image/")).length, histChars + text.length);
         for (const a of visual) {
           if (a.mime.startsWith("image/")) { const url = await blobUrl(a); const b = await imgToJpegB64(url, plan.imgMax); URL.revokeObjectURL(url); if (b) images.push(b); continue; }
@@ -1053,53 +1093,68 @@ function ChatPane(root, projectMode) {
               `Couldn't read frames from ${a.name}: its format isn't supported here` + (why ? ` (${why})` : ". Install ffmpeg so The Claww can read any video.")), out);
           }
         }
-        for (const a of atts.filter(x => !visual.includes(x)))
-          notes += isText(a.name, a.mime) ? `\n\nAttached file ${a.name}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 20000 })}\n\`\`\`` : `\n(Also attached: ${a.name}, ${a.mime})`;
-        const messages = [];
-        const pre = preamble(); if (pre) messages.push({ role: "system", content: pre.trim() });
-        hist.forEach(m => messages.push({ role: m.u ? "user" : "assistant", content: m.t }));
-        messages.push({ role: "user", content: (text || "What's in this?") + notes, images });
-        handlers[job] = {
-          out: line => {
-            try {
-              const j = JSON.parse(line);
-              if (j.error) acc += friendlyError(j.error) || (/image|vision|multimodal/i.test(j.error) ? `${runModel} can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:7b or llava, then try again.\n(${j.error})` : `Ollama error: ${j.error}`);
-              else acc += j.message?.content || "";
-              show();
-            } catch {}
-          },
-          done: p => { if (p.error && !stopped && !acc) { acc = `Couldn't reach Ollama: ${p.error}`; show(); } finish(); },
-        };
-        await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: runModel, stream: true, messages, options: { num_ctx: ctx } }), event: "chat-line" });
-      } else {
-        let files = "";
-        for (const a of atts) {
-          files += isText(a.name, a.mime) ? `\n\nAttached file ${a.path}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 12000 })}\n\`\`\`` : `\n\nAttached file: ${a.path} (${a.mime}). Use your tools to inspect it if needed.`;
-        }
-        const body = (text || "Please look at the attached file(s).") + files;
-        const ctx = context(prior);
-        const prompt = preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
-        // claw answers with one JSON line at the end: show only the reply plus a short line per tool used.
-        let raw = "";
-        acc = "Thinking…"; show(); out.classList.add("thinking");
-        handlers[job] = {
-          out: chunk => {
-            raw += chunk;
-            const evs = [...raw.matchAll(/CLAW_TOOL (\{.*\})\s*$/gm)];
-            if (evs.length && !stopped) { const st = clawStatus(evs[evs.length - 1][1]); if (st) { acc = st + "…"; show(); } }
-          },
-          done: p => {
-            out.classList.remove("thinking");
-            acc = stopped ? "" : clawReply(raw.replace(/^.*CLAW_TOOL \{.*$/gm, "").replace(ansi, ""));
-            if (!stopped && /exceeds the available context size/i.test(acc)) acc = friendlyError(acc) || acc;
-            if (!stopped && p.code !== 0 && !acc.trim()) acc = `claw stopped (code ${p.code}). Is Ollama running and ${runModel} downloaded?`;
-            show(); finish();
-          },
-        };
-        await invoke("ensure_dir", { path: workDir() });
-        await invoke("claw_run", { id: job, prompt, model: runModel, host: S.host, cwd: workDir() });
       }
-    } catch (e) { acc = "Error: " + e; show(); finish(); }
+      for (const a of atts.filter(x => !visual.includes(x)))
+        notes += isText(a.name, a.mime) ? `\n\nAttached file ${a.name}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 20000 })}\n\`\`\`` : `\n(Also attached: ${a.name}, ${a.mime})`;
+      const messages = [{ role: "system", content: (DIRECT_PERSONA + "\n\n" + preamble()).trim() }];
+      hist.forEach(m => messages.push({ role: m.u ? "user" : "assistant", content: m.t }));
+      const um2 = { role: "user", content: (text || (visual.length ? "What's in this?" : "Please look at the attached file(s).")) + notes };
+      if (images.length) um2.images = images;
+      messages.push(um2);
+      const opts = {}; if (visual.length || ctxSet) opts.num_ctx = ctx;
+      handlers[job] = {
+        out: line => {
+          try {
+            const j = JSON.parse(line);
+            if (!got) { got = true; acc = ""; out.classList.remove("thinking"); }
+            if (j.error) acc += friendlyError(j.error) || (/image|vision|multimodal/i.test(j.error) ? `${runModel} can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:7b or llava, then try again.\n(${j.error})` : `Ollama error: ${j.error}`);
+            else acc += j.message?.content || "";
+            show();
+          } catch {}
+        },
+        done: p => { out.classList.remove("thinking"); if (!got) acc = ""; if (p.error && !stopped && !acc) { acc = `Couldn't reach Ollama: ${p.error}`; show(); } else show(); finish(); },
+      };
+      await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: runModel, stream: true, messages, ...(Object.keys(opts).length ? { options: opts } : {}) }), event: "chat-line" });
+    };
+    const runClaw = async () => {
+      job = uid();
+      let files = "";
+      for (const a of atts) {
+        files += isText(a.name, a.mime) ? `\n\nAttached file ${a.path}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 12000 })}\n\`\`\`` : `\n\nAttached file: ${a.path} (${a.mime}). Use your tools to inspect it if needed.`;
+      }
+      const body = (text || "Please look at the attached file(s).") + files;
+      const ctx = context(prior);
+      const prompt = preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
+      // claw answers with one JSON line at the end: show only the reply plus a short line per tool used.
+      let raw = "";
+      thinking();
+      handlers[job] = {
+        out: chunk => {
+          raw += chunk;
+          const evs = [...raw.matchAll(/CLAW_TOOL (\{.*\})\s*$/gm)];
+          if (evs.length && !stopped) { const st = clawStatus(evs[evs.length - 1][1]); if (st) { acc = st + "…"; show(); } }
+        },
+        done: p => {
+          const reply = stopped ? "" : clawReply(raw.replace(/^.*CLAW_TOOL \{.*$/gm, "").replace(ansi, ""));
+          // Safety net: the model turned out not to support tools. Remember that and answer directly instead.
+          if (!stopped && /does not support tools/i.test(reply + raw)) {
+            Caps.markNoTools(runModel); delete handlers[job];
+            runDirect().catch(e => { acc = "Error: " + e; show(); finish(); });
+            return;
+          }
+          out.classList.remove("thinking");
+          acc = reply;
+          if (!stopped && /exceeds the available context size/i.test(acc)) acc = friendlyError(acc) || acc;
+          if (!stopped && p.code !== 0 && !acc.trim()) acc = `claw stopped (code ${p.code}). Is Ollama running and ${runModel} downloaded?`;
+          show(); finish();
+        },
+      };
+      await invoke("ensure_dir", { path: workDir() });
+      await invoke("claw_run", { id: job, prompt, model: runModel, host: S.host, cwd: workDir() });
+    };
+    try {
+      if (visual.length || noTools) await runDirect(); else await runClaw();
+    } catch (e) { out.classList.remove("thinking"); acc = "Error: " + e; show(); finish(); }
   };
   function suggestCard(out, adv) {
     const e = adv.suggest;
@@ -1157,15 +1212,30 @@ function taskModelsSection() {
       const sel = h("select", { class: "field" });
       sel.append(h("option", { value: "" }, "Auto"));
       const opts = [...new Set([...(names || []), ...(cur ? [cur] : [])])];
-      opts.forEach(n => sel.append(h("option", { value: n }, n + (names && !names.some(x => normName(x) === normName(n)) ? " (not installed)" : ""))));
+      const optLabel = n => n + (Caps.noTools(n) ? "  · no tools" : "") + (names && !names.some(x => normName(x) === normName(n)) ? " (not installed)" : "");
+      opts.forEach(n => sel.append(h("option", { value: n }, optLabel(n))));
       sel.value = cur;
-      sel.onchange = () => setTaskPick(k, sel.value);
-      box.append(h("div", { class: "taskrow" }, h("span", {}, label), sel));
+      // Tools switch: on by default; greyed out when the picked model can't use tools.
+      const tl = h("input", { type: "checkbox" }); tl.checked = taskTools(k);
+      const tnote = h("div", { class: "muted tnote hidden" }, "This model can't use tools");
+      const paintTools = () => {
+        const m = sel.value || (k === "chat" ? S.model : "");
+        const no = m && Caps.noTools(m);
+        tl.disabled = !!no; tl.checked = no ? false : taskTools(k);
+        tsw.classList.toggle("off", !!no); tnote.classList.toggle("hidden", !no);
+      };
+      const tsw = h("label", { class: "tsw", title: "Off: chat straight with the model (no web search, files or commands)" }, tl, "Tools");
+      tl.onchange = () => setTaskTools(k, tl.checked);
+      sel.onchange = () => { setTaskPick(k, sel.value); paintTools(); if (sel.value) Caps.get(sel.value).then(paintTools); };
+      opts.forEach(n => Caps.get(n).then(() => { const o = [...sel.options].find(x => x.value === n); if (o) o.textContent = optLabel(n); if (n === (sel.value || "")) paintTools(); }));
+      if (sel.value) Caps.get(sel.value).then(paintTools);
+      paintTools();
+      box.append(h("div", { class: "taskrow" }, h("span", {}, label), sel, tsw), tnote);
     });
   };
   render(null);
   return { els: [lbl("Models for tasks · Auto picks the right model for the task"), box,
-    h("div", { class: "muted", style: "margin-top:6px" }, "When a message is about one of these, claw uses the model you pick here.")], render };
+    h("div", { class: "muted", style: "margin-top:6px" }, "When a message is about one of these, claw uses the model you pick here. Tools lets it search the web, read and write files and run commands; with Tools off (or a model that can't use them) it just chats.")], render };
 }
 // GitHub: a personal access token lets claw work with your repos, issues and pull requests (GitHub's MCP server).
 function githubSection() {
@@ -1199,7 +1269,12 @@ function openSettings() {
     if (!l.length) installed.append(h("div", { class: "muted" }, instList.length ? `No installed model matches "${mq.value.trim()}".` : "None yet. Download one above."));
     l.forEach(x => { const on = normName(x.name) === normName(model.value.trim());
       installed.append(h("div", { class: "inst" + (on ? " on" : ""), title: x.name, onclick: () => { model.value = x.name; P.set("model", x.name); pollStatus(); renderInst(); } },
-        h("span", { class: "grow" }, x.name), h("span", { class: "muted" }, `${(x.size / 1e9).toFixed(1)} GB · ${on ? "In use" : "Use"}`))); });
+        h("span", { class: "grow" }, x.name, Caps.noTools(x.name) ? h("span", { class: "notools", title: "This model can't use tools, so claw chats with it directly" }, "no tools") : null),
+        h("span", { class: "muted" }, `${(x.size / 1e9).toFixed(1)} GB · ${on ? "In use" : "Use"}`))); });
+    // Learn tool support for models not checked yet, then repaint once.
+    renderInst.tried = renderInst.tried || new Set();
+    const unknown = l.filter(x => !Caps.known(x.name) && !renderInst.tried.has(x.name)); unknown.forEach(x => renderInst.tried.add(x.name));
+    if (unknown.length && !renderInst.busy) { renderInst.busy = true; Promise.all(unknown.map(x => Caps.get(x.name))).then(() => { renderInst.busy = false; renderInst(); }); }
   };
   mq.addEventListener("input", renderInst);
   const ram = SYS ? SYS.memTotal / 1e9 : 0;

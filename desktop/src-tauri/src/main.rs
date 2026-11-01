@@ -158,6 +158,19 @@ fn http_get(url: String, timeout_ms: Option<u64>) -> Result<String, String> {
         .call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())
 }
 
+/// POST a JSON body and return the whole reply (Ollama's /api/show and other one-shot calls).
+#[tauri::command]
+async fn http_post(url: String, body: String, timeout_ms: Option<u64>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        match ureq::post(&url).set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_millis(timeout_ms.unwrap_or(5000))).send_string(&body) {
+            Ok(r) => r.into_string().map_err(|e| e.to_string()),
+            Err(ureq::Error::Status(code, r)) => Err(format!("HTTP {code}: {}", r.into_string().unwrap_or_default())),
+            Err(e) => Err(e.to_string()),
+        }
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[derive(Default)]
 struct Awake(Mutex<Option<Child>>);
 
@@ -642,7 +655,7 @@ fn main() {
             allow_microphone(_app);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, keep_awake, github_status, github_set, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, keep_awake, github_status, github_set, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }
