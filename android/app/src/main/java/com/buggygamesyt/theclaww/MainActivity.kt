@@ -594,8 +594,17 @@ class MainActivity : Activity() {
                     setOnClickListener { openSettings() }
                 })
             }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            if (mode == null) head.addView(chip("Chats") { showHistory() }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) })
-            head.addView(chip("New") { if (!busy) open(Store.newConv(if (mode == null) null else conv.project)) })
+            headMain = head.getChildAt(head.childCount - 1)
+            val searchBtn = FrameLayout(this@MainActivity).apply {
+                background = round(surface2, 18)
+                addView(Glyph(this@MainActivity, "search", fg), FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
+                setOnClickListener { openSearch() }
+            }
+            head.addView(searchBtn, LinearLayout.LayoutParams(dp(36), dp(36)).apply { rightMargin = dp(8) })
+            headExtras += searchBtn
+            if (mode == null) head.addView(chip("Chats") { showHistory() }.also { headExtras += it }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) })
+            head.addView(chip("New") { if (!busy) open(Store.newConv(if (mode == null) null else conv.project)) }.also { headExtras += it })
+            buildSearchBox(head)
 
             input = EditText(this@MainActivity).apply {
                 hint = if (mode == null) "Message claw" else "Message claw about this project"
@@ -634,14 +643,153 @@ class MainActivity : Activity() {
             }
             root.addView(head, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            root.addView(resultsScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             root.addView(wrap, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             sub.text = statusLine; subDot.background = round(statusColor, 4)
         }
 
         private val project get() = Store.project(conv.project)
 
+        // ---------- Search: icon stretches into a bar. Chat tab = all chats; project chat = this chat only ----------
+        private var headMain: View? = null
+        private val headExtras = mutableListOf<View>()
+        private lateinit var searchBox: LinearLayout
+        private lateinit var searchField: EditText
+        private val searchCount = text("", 12f, muted)
+        private val results = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(4), dp(14), dp(16)) }
+        private val resultsScroll = ScrollView(this@MainActivity).apply { addView(results); visibility = View.GONE }
+        private val bubbleViews = mutableListOf<TextView>()
+        private val saved = HashMap<TextView, CharSequence>()
+        private var hits = listOf<Int>(); private var hitIdx = 0
+        private var searching = false
+
+        private fun buildSearchBox(head: LinearLayout) {
+            fun iconBtn(kind: String, click: () -> Unit) = FrameLayout(this@MainActivity).apply {
+                addView(Glyph(this@MainActivity, kind, fg), FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER)); setOnClickListener { click() }
+            }
+            searchField = EditText(this@MainActivity).apply {
+                hint = if (mode == null) "Search all chats" else "Search this chat"; setHintTextColor(muted); setTextColor(fg)
+                background = null; setSingleLine(); textSize = 15f; setPadding(dp(4), dp(6), dp(4), dp(6))
+                imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+                addTextChangedListener(object : android.text.TextWatcher {
+                    override fun afterTextChanged(e: android.text.Editable?) { runSearch(e.toString().trim()) }
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                })
+            }
+            searchBox = LinearLayout(this@MainActivity).apply {
+                gravity = Gravity.CENTER_VERTICAL; background = round(surface2, 18); setPadding(dp(12), 0, dp(4), 0); visibility = View.GONE
+                addView(Glyph(this@MainActivity, "search", muted), LinearLayout.LayoutParams(dp(14), dp(14)).apply { rightMargin = dp(6) })
+                addView(searchField, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                addView(searchCount)
+                if (mode != null) {
+                    addView(iconBtn("chevup") { jump(-1) }, LinearLayout.LayoutParams(dp(32), dp(36)))
+                    addView(iconBtn("chevdown") { jump(1) }, LinearLayout.LayoutParams(dp(32), dp(36)))
+                }
+                addView(iconBtn("close") { closeSearch() }, LinearLayout.LayoutParams(dp(34), dp(36)))
+            }
+            head.addView(searchBox, LinearLayout.LayoutParams(dp(36), dp(36)))
+        }
+
+        private fun openSearch() {
+            if (searching) return
+            searching = true
+            val head = searchBox.parent as LinearLayout
+            val full = head.width - head.paddingLeft - head.paddingRight - (head.getChildAt(0).takeIf { mode != null }?.width ?: 0)
+            headMain?.visibility = View.GONE; headExtras.forEach { it.visibility = View.GONE }
+            searchBox.visibility = View.VISIBLE; searchBox.alpha = 0.4f
+            android.animation.ValueAnimator.ofInt(dp(36), full).apply {
+                duration = 260; interpolator = android.view.animation.DecelerateInterpolator(1.8f)
+                addUpdateListener { searchBox.layoutParams = searchBox.layoutParams.apply { width = it.animatedValue as Int }; searchBox.alpha = 0.4f + 0.6f * it.animatedFraction; searchBox.requestLayout() }
+                doOnEndCompat { searchField.requestFocus(); (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(searchField, 0) }
+                start()
+            }
+        }
+
+        private fun closeSearch() {
+            if (!searching) return
+            searching = false
+            searchField.setText(""); hideKeyboard(); clearHighlights()
+            resultsScroll.visibility = View.GONE; scroll.visibility = View.VISIBLE
+            android.animation.ValueAnimator.ofInt(searchBox.width, dp(36)).apply {
+                duration = 200; interpolator = android.view.animation.AccelerateInterpolator()
+                addUpdateListener { searchBox.layoutParams = searchBox.layoutParams.apply { width = it.animatedValue as Int }; searchBox.alpha = 1f - 0.6f * it.animatedFraction; searchBox.requestLayout() }
+                doOnEndCompat { searchBox.visibility = View.GONE; headMain?.visibility = View.VISIBLE; headExtras.forEach { it.visibility = View.VISIBLE } }
+                start()
+            }
+        }
+
+        private fun android.animation.ValueAnimator.doOnEndCompat(f: () -> Unit) = addListener(object : android.animation.AnimatorListenerAdapter() {
+            override fun onAnimationEnd(a: android.animation.Animator) { f() }
+        })
+
+        private fun runSearch(q: String) {
+            if (mode != null) { findInChat(q); return }
+            results.removeAllViews()
+            if (q.isEmpty()) { resultsScroll.visibility = View.GONE; scroll.visibility = View.VISIBLE; searchCount.text = ""; return }
+            resultsScroll.visibility = View.VISIBLE; scroll.visibility = View.GONE
+            var n = 0
+            Store.regularChats().forEach { c ->
+                val msgs = Store.msgs(c)
+                val inTitle = c.title.contains(q, true)
+                val m = msgs.firstOrNull { it.text.contains(q, true) }
+                if (!inTitle && m == null) return@forEach
+                n++
+                val card = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; background = panel(18); setPadding(dp(14), dp(12), dp(14), dp(12)) }
+                card.addView(text(c.title, 15f, fg, true).apply { this.text = highlight(c.title, q) })
+                if (m != null) {
+                    val i = m.text.indexOf(q, ignoreCase = true)
+                    val from = maxOf(0, i - 40); val snip = (if (from > 0) "…" else "") + m.text.substring(from, minOf(m.text.length, i + q.length + 80)).replace('\n', ' ')
+                    card.addView(text("", 13f, muted).apply { this.text = highlight((if (m.user) "You: " else "claw: ") + snip, q); maxLines = 3 })
+                }
+                card.addView(text(ago(c.updated), 11f, muted).apply { setPadding(0, dp(4), 0, 0) })
+                card.setOnClickListener { if (!busy) { closeSearch(); open(c); scroll.post { findInChat(q, true) } } }
+                results.addView(card, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(10) })
+            }
+            searchCount.text = "$n  "
+            if (n == 0) results.addView(text("No chats mention \"$q\".", 14f, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(30), 0, 0) })
+        }
+
+        private fun highlight(s: String, q: String): CharSequence {
+            if (q.isEmpty()) return s
+            val sp = android.text.SpannableString(s)
+            var i = s.indexOf(q, 0, true)
+            while (i >= 0) {
+                sp.setSpan(android.text.style.BackgroundColorSpan(withAlpha(accent, 110)), i, i + q.length, 0)
+                sp.setSpan(android.text.style.StyleSpan(Typeface.BOLD), i, i + q.length, 0)
+                i = s.indexOf(q, i + q.length, true)
+            }
+            return sp
+        }
+
+        private fun clearHighlights() { saved.forEach { (tv, orig) -> tv.text = orig }; saved.clear(); hits = emptyList() }
+
+        /** Highlight every match inside this chat and jump to the newest; [flash] = keep highlights after closing search. */
+        private fun findInChat(q: String, flash: Boolean = false) {
+            clearHighlights()
+            if (q.isEmpty()) { searchCount.text = ""; return }
+            hits = bubbleViews.indices.filter { bubbleViews[it].text.toString().contains(q, true) }
+            hits.forEach { i -> val tv = bubbleViews[i]; saved[tv] = tv.text; tv.text = highlight(tv.text.toString(), q) }
+            hitIdx = hits.size - 1
+            searchCount.text = if (hits.isEmpty()) "0  " else "${hitIdx + 1}/${hits.size}  "
+            if (hits.isNotEmpty()) scrollToHit()
+            if (flash) scroll.postDelayed({ if (!searching) clearHighlights() }, 4000)
+        }
+        private fun jump(d: Int) {
+            if (hits.isEmpty()) return
+            hitIdx = (hitIdx + d + hits.size) % hits.size
+            searchCount.text = "${hitIdx + 1}/${hits.size}  "; scrollToHit()
+        }
+        private fun scrollToHit() {
+            val tv = bubbleViews[hits[hitIdx]]
+            var y = 0; var v: View = tv
+            while (v !== chat && v.parent is View) { y += v.top; v = v.parent as View }
+            scroll.smoothScrollTo(0, maxOf(0, y - dp(60)))
+        }
+
         fun open(c: Conv) {
             conv = c
+            bubbleViews.clear(); saved.clear(); hits = emptyList()
             if (mode == null) prefs.edit().putString("curChat", c.id).apply()
             chat.removeAllViews(); pending.clear(); renderPending()
             title.text = if (mode == null) (if (c.title == "New chat") "Chat" else c.title) else "${project?.name ?: "Project"} · ${c.title}"
@@ -704,6 +852,7 @@ class MainActivity : Activity() {
                 if (s.isEmpty()) visibility = View.GONE
             }
             col.addView(tv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            bubbleViews += tv
             chat.addView(LinearLayout(this@MainActivity).apply {
                 gravity = if (user) Gravity.END else Gravity.START
                 setPadding(0, dp(5), 0, dp(5)); addView(col)

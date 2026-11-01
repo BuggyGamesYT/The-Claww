@@ -126,8 +126,38 @@ fn http_stream(app: AppHandle, jobs: State<'_, Jobs>, id: String, url: String, b
 }
 
 #[tauri::command]
-fn http_get(url: String) -> Result<String, String> {
-    ureq::get(&url).timeout(std::time::Duration::from_secs(3)).call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())
+fn http_get(url: String, timeout_ms: Option<u64>) -> Result<String, String> {
+    ureq::get(&url)
+        .set("User-Agent", "TheClaww/0.3 (desktop)")
+        .timeout(std::time::Duration::from_millis(timeout_ms.unwrap_or(3000)))
+        .call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())
+}
+
+#[derive(Default)]
+struct Awake(Mutex<Option<Child>>);
+
+/// Keep the PC from sleeping while models download (Windows: SetThreadExecutionState; Linux: systemd-inhibit).
+#[tauri::command]
+fn keep_awake(state: State<'_, Awake>, on: bool) {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" { fn SetThreadExecutionState(flags: u32) -> u32; }
+        const ES_CONTINUOUS: u32 = 0x8000_0000; const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+        unsafe { SetThreadExecutionState(if on { ES_CONTINUOUS | ES_SYSTEM_REQUIRED } else { ES_CONTINUOUS }); }
+        let _ = &state;
+    }
+    #[cfg(not(windows))]
+    {
+        let mut g = state.0.lock().unwrap();
+        if on && g.is_none() {
+            *g = Command::new("systemd-inhibit")
+                .args(["--what=sleep:idle", "--who=The Claww", "--why=Downloading AI models", "--mode=block", "sleep", "infinity"])
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+        } else if !on {
+            if let Some(mut c) = g.take() { let _ = c.kill(); let _ = c.wait(); }
+        }
+    }
 }
 
 #[tauri::command]
@@ -183,7 +213,8 @@ fn start_ollama() -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .manage(Jobs::default())
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama])
+        .manage(Awake::default())
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama, keep_awake])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }

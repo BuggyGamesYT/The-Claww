@@ -30,6 +30,10 @@ class Glyph(ctx: Context, private val kind: String, color: Int) : View(ctx) {
             }
             "plus" -> { c.drawLine(w / 2, i, w / 2, h - i, p); c.drawLine(i, h / 2, w - i, h / 2, p) }
             "back" -> c.drawPath(Path().apply { moveTo(w * 0.68f, i); lineTo(w * 0.28f, h / 2); lineTo(w * 0.68f, h - i) }, p)
+            "search" -> { val r = w * 0.32f; c.drawCircle(w * 0.42f, h * 0.42f, r, p); c.drawLine(w * 0.42f + r * 0.72f, h * 0.42f + r * 0.72f, w - i, h - i, p) }
+            "close" -> { c.drawLine(i, i, w - i, h - i, p); c.drawLine(w - i, i, i, h - i, p) }
+            "chevup" -> c.drawPath(Path().apply { moveTo(i, h * 0.68f); lineTo(w / 2, h * 0.3f); lineTo(w - i, h * 0.68f) }, p)
+            "chevdown" -> c.drawPath(Path().apply { moveTo(i, h * 0.32f); lineTo(w / 2, h * 0.7f); lineTo(w - i, h * 0.32f) }, p)
         }
     }
 }
