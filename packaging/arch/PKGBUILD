@@ -61,5 +61,6 @@ package() {
   local doc="${pkgdir}/usr/share/doc/${_name}"
   install -Dm644 -t "${doc}" \
     "${_name}/README.md" "${_name}/USAGE.md" "${_name}/CHANGELOG.md" \
-    "${_name}/packaging/arch/README.md" settings.example.json
+    settings.example.json
+  install -Dm644 "${_name}/packaging/arch/README.md" "${doc}/README.arch.md"
 }
