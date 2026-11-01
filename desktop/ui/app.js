@@ -1135,7 +1135,10 @@ function ChatPane(root, projectMode) {
     const usingNote = m => out.parentNode.insertBefore(h("div", { class: "muted", style: "font-size:12px;margin:0 0 4px 6px" }, `Using ${m} for ${Advisor.LABEL[task]}`), out);
     if (picked) { runModel = picked; if (normName(picked) !== normName(S.model)) usingNote(runModel); }
     else {
-      if (inst) adv = Advisor.advise(task, inst, S.model, SYS ? SYS.memTotal / 1e9 : 8, 0.75);
+      // Photos and video: size the pick to the graphics card when it's known. A vision model that spills out of
+      // VRAM with a 16K context is what made Ollama quit (gemma3:12b on an 8 GB card).
+      const vr = P.get("vramBytes", 0);
+      if (inst) adv = task === "vision" && vr ? Advisor.advise(task, inst, S.model, vr / 1e9, 1.0) : Advisor.advise(task, inst, S.model, SYS ? SYS.memTotal / 1e9 : 8, 0.75);
       if (adv && adv.switchTo && P.get("autoSwitch", false)) { runModel = adv.switchTo; usingNote(runModel); }
     }
     const show = () => { out.textContent = acc.trim() || "…"; list.scrollTop = list.scrollHeight; };
@@ -1750,6 +1753,7 @@ let chatPane, projPane;
   if (PATHS.clawFound === false) chatPane.input.placeholder = "claw binary missing from this install";
   // Try to start Ollama once if it isn't running locally.
   try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", ollamaEnv()).catch(() => {}); }
+  invoke("gpu_info").then(g => { if (g && g.vram) P.set("vramBytes", g.vram); }).catch(() => {});
   pollStatus(); setInterval(pollStatus, 4000);
   checkNewModels(false); setInterval(() => checkNewModels(false), 30 * 60000);
   addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
