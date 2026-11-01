@@ -162,7 +162,7 @@ jobs:
           arch=(x86_64)
           url="https://github.com/BuggyGamesYT/The-Claww"
           license=(MIT)
-          depends=(webkit2gtk-4.1 gtk3 openssl gst-libav gst-plugins-good)
+          depends=(webkit2gtk-4.1 gtk3 openssl gst-libav gst-plugins-good noto-fonts-emoji)
           optdepends=('ollama: run models on this PC' 'gst-plugin-pipewire: microphone on PipeWire' 'gst-plugins-bad: play more video formats (H.265/HEVC and others) in chat' 'ffmpeg: playable copies and frames from any video')
           options=(!debug !strip)
           source=(the-claww claw whisper-cli the-claww.desktop 128x128.png)

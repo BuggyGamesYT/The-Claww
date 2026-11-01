@@ -57,7 +57,8 @@
       "deb": {
         "depends": [
           "gstreamer1.0-libav",
-          "gstreamer1.0-plugins-good"
+          "gstreamer1.0-plugins-good",
+          "fonts-noto-color-emoji"
         ]
       }
     }

@@ -6,6 +6,8 @@ const invoke = (cmd, args) => T.core.invoke(cmd, args);
 const listen = (ev, fn) => T.event.listen(ev, e => fn(e.payload));
 const fileSrc = p => T.core.convertFileSrc(p);
 const $ = (s, el = document) => el.querySelector(s);
+// A plus drawn as an icon, so it never depends on the fonts installed (a missing glyph showed as a box on Arch).
+const plusIcon = () => { const sp = document.createElement("span"); sp.className = "plusicon"; sp.innerHTML = '<svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg>'; return sp; };
 const h = (tag, attrs = {}, ...kids) => {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -342,7 +344,7 @@ function renderHome() {
     longPress(c, () => c.dispatchEvent(new MouseEvent("contextmenu")));
     home.append(c);
   });
-  home.append(h("div", { class: "card panel click addcard", onclick: addWidget }, "＋  Add a widget"));
+  home.append(h("div", { class: "card panel click addcard", onclick: addWidget }, plusIcon(), "Add a widget"));
   home.append(h("div", { class: "muted", style: "text-align:center" }, "Right-click or long-press a widget to move or remove it. Swipe, or Ctrl+1/2/3, to switch tabs."));
   liveUpdaters.forEach(f => f());
 }
@@ -454,7 +456,7 @@ function showProjectDetail(p) {
   el.append(h("div", { class: "card panel click", onclick: async () => { const t = await ask("Project notes", "Goals, context, rules", p.notes, true); if (t != null) { p.notes = t; Store.saveProjects(); showProjectDetail(p); } } },
     h("div", { class: "hdr" }, "Project notes"), h("div", { style: "white-space:pre-wrap", class: p.notes ? "" : "muted" }, p.notes || "Click to add goals, context or rules claw should follow in this project."),
     h("div", { class: "muted", style: "margin-top:8px;font-size:11px" }, "Folder: " + projectDir(p))));
-  el.append(h("button", { class: "btn-accent", onclick: () => openProjectChat(Store.newConv(p.id)) }, `＋  New chat in ${p.name}`));
+  el.append(h("button", { class: "btn-accent", onclick: () => openProjectChat(Store.newConv(p.id)) }, plusIcon(), `New chat in ${p.name}`));
   const chats = Store.ofProject(p.id);
   if (chats.length) el.append(h("div", { class: "hdr", style: "margin:8px 4px" }, "Chats"));
   chats.forEach(cv => {
