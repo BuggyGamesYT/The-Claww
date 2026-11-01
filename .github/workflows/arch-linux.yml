@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Install build deps
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust
+          pacman -Syu --noconfirm --needed base-devel git rust libglvnd libxkbcommon wayland libx11 libxcursor libxi libxrandr hicolor-icon-theme
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 
