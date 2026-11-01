@@ -211,9 +211,10 @@ fn start_ollama() -> Result<(), String> {
 }
 
 fn main() {
-    // WebKitGTK's DMA-BUF renderer crashes or blanks on many Arch setups (NVIDIA, some Wayland), especially with video.
+    // Keep GPU rendering on by default (forcing DMA-BUF off pushed blur/video onto the CPU and spun fans).
+    // `the-claww --safe-render` opts into the slower fallback for GPUs where WebKitGTK shows black or crashes.
     #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+    if std::env::args().any(|a| a == "--safe-render") && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
     tauri::Builder::default()

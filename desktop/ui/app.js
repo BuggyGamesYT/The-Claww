@@ -143,6 +143,8 @@ function applyLook() {
     wall.append(v);
   }
 }
+// Don't decode the video wallpaper while the window is minimized or hidden.
+document.addEventListener("visibilitychange", () => { const v = document.querySelector("#wall video"); if (v) document.hidden ? v.pause() : v.play().catch(() => {}); });
 
 let wallBlob = { path: "", url: "" };
 function startAnimated(wall, kind, bg, cols) {
