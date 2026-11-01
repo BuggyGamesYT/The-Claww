@@ -190,6 +190,10 @@ struct Config {
     wall: String,
     photo: String,
     dim: u8,
+    /// "Solid" or "Liquid glass".
+    bubble: String,
+    /// Bubble transparency, 0 (opaque) to 90 percent.
+    clear: u8,
     builtin: bool,
     host: String,
     model: String,
@@ -204,6 +208,8 @@ impl Default for Config {
             wall: "None".into(),
             photo: String::new(),
             dim: 40,
+            bubble: "Solid".into(),
+            clear: 0,
             builtin: true,
             host: String::new(),
             model,
@@ -725,6 +731,37 @@ impl App {
         }
     }
 
+    /// Fill and edge for a chat bubble (or the input pill) of base colour `base`.
+    fn bubble_style(&self, base: Color32) -> (Color32, Stroke, bool) {
+        let keep = 1.0 - self.cfg.clear.min(90) as f32 / 100.0;
+        if self.cfg.bubble == "Liquid glass" {
+            let tint = mixc(base, Color32::WHITE, 0.18);
+            let a = (0.42 * keep * 255.0).clamp(10.0, 255.0) as u8;
+            let fill = Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), a);
+            (fill, Stroke::new(1.0, Color32::from_white_alpha((70.0 * keep.max(0.4)) as u8)), true)
+        } else {
+            let a = (base.a() as f32 * keep) as u8;
+            let c = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a.max(8));
+            (c, Stroke::NONE, false)
+        }
+    }
+
+    /// Glassy sheen painted under a bubble's translucent fill: bright at the top edge, gone by the middle.
+    fn glass_sheen(rect: egui::Rect, radius: f32) -> egui::Shape {
+        let r = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + radius * 0.6, rect.top() + 1.0),
+            egui::pos2(rect.right() - radius * 0.6, rect.center().y),
+        );
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(r.left_top(), Color32::from_white_alpha(46));
+        mesh.colored_vertex(r.right_top(), Color32::from_white_alpha(46));
+        mesh.colored_vertex(r.right_bottom(), Color32::TRANSPARENT);
+        mesh.colored_vertex(r.left_bottom(), Color32::TRANSPARENT);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        egui::Shape::mesh(mesh)
+    }
+
     fn has_wall(&self) -> bool {
         self.cfg.wall != "None"
     }
@@ -900,6 +937,19 @@ impl App {
                 if let Some(e) = &self.photo_error {
                     ui.label(RichText::new(e).size(12.0).color(AMBER));
                 }
+                ui.label(RichText::new("Chat bubbles").size(12.0).color(t.muted));
+                ui.horizontal(|ui| {
+                    for style in ["Solid", "Liquid glass"] {
+                        if ui.selectable_label(self.cfg.bubble == style, style).clicked() {
+                            self.cfg.bubble = style.into();
+                            restyle = true;
+                        }
+                    }
+                });
+                ui.label(RichText::new("Bubble transparency").size(12.0).color(t.muted));
+                if ui.add(egui::Slider::new(&mut self.cfg.clear, 0..=90).suffix("%")).changed() {
+                    restyle = true;
+                }
                 ui.label(RichText::new("Wallpaper dimming").size(12.0).color(t.muted));
                 if ui.add(egui::Slider::new(&mut self.cfg.dim, 0..=90).suffix("%")).changed() {
                     restyle = true;
@@ -1008,7 +1058,9 @@ impl eframe::App for App {
             // Input pill pinned to the bottom, chat fills the rest.
             let busy = self.reply.is_some();
             egui::TopBottomPanel::bottom("input").frame(egui::Frame::none().inner_margin(Margin { left: 16.0, right: 16.0, top: 8.0, bottom: 16.0 })).show_inside(ui, |ui| {
-                egui::Frame::none().fill(surface).rounding(Rounding::same(26.0)).inner_margin(Margin { left: 4.0, right: 4.0, top: 4.0, bottom: 4.0 }).show(ui, |ui| {
+                let (pill_fill, pill_edge, pill_glass) = self.bubble_style(surface);
+                let sheen_at = ui.painter().add(egui::Shape::Noop);
+                let pill = egui::Frame::none().fill(pill_fill).stroke(pill_edge).rounding(Rounding::same(26.0)).inner_margin(Margin { left: 4.0, right: 4.0, top: 4.0, bottom: 4.0 }).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let w = ui.available_width() - 52.0;
                         // The text box fills the whole pill (minus the send button), so a click
@@ -1044,6 +1096,9 @@ impl eframe::App for App {
                         }
                     });
                 });
+                if pill_glass {
+                    ui.painter().set(sheen_at, Self::glass_sheen(pill.response.rect, 26.0));
+                }
             });
 
             egui::CentralPanel::default().frame(egui::Frame::none()).show_inside(ui, |ui| {
@@ -1066,10 +1121,14 @@ impl eframe::App for App {
                         }
                         let fit = fit.ceil().clamp(8.0, max_w);
                         let layout = if m.user { Layout::right_to_left(Align::Min) } else { Layout::left_to_right(Align::Min) };
+                        let (fill, edge, glass) = self.bubble_style(if m.user { t.accent } else { surface });
+                        let text_col = if m.user && !glass && self.cfg.clear < 50 { t.on_accent } else { t.fg };
                         ui.with_layout(layout, |ui| {
                             ui.add_space(16.0);
-                            egui::Frame::none()
-                                .fill(if m.user { t.accent } else { surface })
+                            let sheen_at = ui.painter().add(egui::Shape::Noop);
+                            let bubble = egui::Frame::none()
+                                .fill(fill)
+                                .stroke(edge)
                                 .rounding(Rounding::same(18.0))
                                 .inner_margin(Margin::symmetric(14.0, 10.0))
                                 .show(ui, |ui| {
@@ -1078,13 +1137,16 @@ impl eframe::App for App {
                                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                                         ui.set_max_width(fit);
                                         if !m.text.is_empty() {
-                                            ui.add(egui::Label::new(RichText::new(&m.text).font(font.clone()).color(if m.user { t.on_accent } else { t.fg })).selectable(true).wrap());
+                                            ui.add(egui::Label::new(RichText::new(&m.text).font(font.clone()).color(text_col)).selectable(true).wrap());
                                         }
                                         if m.stopped {
                                             ui.label(RichText::new(note).italics().font(note_font.clone()).color(t.muted));
                                         }
                                     });
                                 });
+                            if glass {
+                                ui.painter().set(sheen_at, Self::glass_sheen(bubble.response.rect, 18.0));
+                            }
                         });
                         ui.add_space(4.0);
                     }
