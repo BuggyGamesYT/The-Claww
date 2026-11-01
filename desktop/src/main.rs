@@ -155,6 +155,8 @@ struct App {
     ollama: Option<Child>,
     tried_start: bool,
     wall_tex: Option<(String, TextureHandle)>,
+    /// Where the photo wallpaper was drawn last frame (screen rect, texture uv), for the top fade.
+    wall_photo_geom: Option<(egui::Rect, egui::Rect)>,
     photo_error: Option<String>,
     scroll_to_bottom: bool,
 }
@@ -231,6 +233,7 @@ impl App {
             ollama: None,
             tried_start: false,
             wall_tex: None,
+            wall_photo_geom: None,
             photo_error: None,
             scroll_to_bottom: false,
         };
@@ -474,6 +477,7 @@ impl App {
         let t = self.cfg.theme();
         let grad = WALLPAPERS.iter().find(|(n, _)| *n == self.cfg.wall).and_then(|(_, g)| *g);
         let mut painted = false;
+        self.wall_photo_geom = None;
         if let Some((top, bot)) = grad {
             let mut mesh = egui::Mesh::default();
             mesh.colored_vertex(rect.left_top(), top);
@@ -510,6 +514,7 @@ impl App {
                 let (uw, uh) = (rw / (iw * scale), rh / (ih * scale));
                 let uv = egui::Rect::from_min_size(egui::pos2((1.0 - uw) / 2.0, (1.0 - uh) / 2.0), Vec2::new(uw, uh));
                 painter.image(tex.id(), rect, uv, Color32::WHITE);
+                self.wall_photo_geom = Some((rect, uv));
                 painted = true;
             }
         }
@@ -518,6 +523,66 @@ impl App {
             painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), a));
         } else {
             painter.rect_filled(rect, 0.0, t.bg);
+        }
+    }
+
+    /// Repaint the wallpaper over the top `band` of the chat, fully opaque at the top edge and
+    /// clear at the bottom, so messages fade into nothing as they scroll up.
+    fn paint_top_fade(&self, painter: &egui::Painter, full: egui::Rect, band: egui::Rect) {
+        const STRIPS: usize = 12;
+        let t = self.cfg.theme();
+        let grad = WALLPAPERS.iter().find(|(n, _)| *n == self.cfg.wall).and_then(|(_, g)| *g);
+        let dim = self.cfg.dim as f32 / 100.0;
+        let mix = |a: Color32, b: Color32, f: f32| {
+            let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f).round() as u8;
+            (m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+        };
+        let ys: Vec<f32> = (0..=STRIPS).map(|i| band.top() + band.height() * i as f32 / STRIPS as f32).collect();
+        let fade = |y: f32| {
+            let k = ((y - band.top()) / band.height()).clamp(0.0, 1.0);
+            1.0 - k * k * (3.0 - 2.0 * k) // smoothstep: solid at the top, gone at the bottom
+        };
+        let strip_mesh = |color_at: &dyn Fn(f32) -> Color32, tex: Option<(egui::TextureId, egui::Rect)>| {
+            let mut mesh = match tex {
+                Some((id, _)) => egui::Mesh::with_texture(id),
+                None => egui::Mesh::default(),
+            };
+            for (i, &y) in ys.iter().enumerate() {
+                let c = color_at(y);
+                let uv_at = |x: f32| match tex {
+                    Some((_, uv)) => egui::pos2(
+                        uv.left() + uv.width() * (x - full.left()) / full.width(),
+                        uv.top() + uv.height() * (y - full.top()) / full.height(),
+                    ),
+                    None => egui::Pos2::ZERO,
+                };
+                mesh.vertices.push(egui::epaint::Vertex { pos: egui::pos2(band.left(), y), uv: uv_at(band.left()), color: c });
+                mesh.vertices.push(egui::epaint::Vertex { pos: egui::pos2(band.right(), y), uv: uv_at(band.right()), color: c });
+                if i > 0 {
+                    let b = (i as u32) * 2;
+                    mesh.add_triangle(b - 2, b - 1, b + 1);
+                    mesh.add_triangle(b - 2, b + 1, b);
+                }
+            }
+            mesh
+        };
+        if let Some((top, bot)) = grad {
+            let col = |y: f32| {
+                let f = ((y - full.top()) / full.height()).clamp(0.0, 1.0);
+                let (r, g, b) = mix(top, bot, f);
+                let (r, g, b) = mix(Color32::from_rgb(r, g, b), t.bg, dim);
+                Color32::from_rgba_unmultiplied(r, g, b, (fade(y) * 255.0) as u8)
+            };
+            painter.add(egui::Shape::mesh(strip_mesh(&col, None)));
+        } else if let (Some((rect, uv)), Some((_, tex))) = (self.wall_photo_geom, &self.wall_tex) {
+            let tint = |y: f32| Color32::from_white_alpha((fade(y) * 255.0) as u8);
+            painter.add(egui::Shape::mesh(strip_mesh(&tint, Some((tex.id(), uv)))));
+            let _ = rect;
+            let dimc = |y: f32| Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), (fade(y) * dim * 255.0) as u8);
+            painter.add(egui::Shape::mesh(strip_mesh(&dimc, None)));
+        } else {
+            let plain = |y: f32| Color32::from_rgba_unmultiplied(t.bg.r(), t.bg.g(), t.bg.b(), (fade(y) * 255.0) as u8);
+            painter.add(egui::Shape::mesh(strip_mesh(&plain, None)));
         }
     }
 
@@ -745,6 +810,7 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
+            let full_rect = ui.max_rect();
             self.paint_wallpaper(ctx, ui);
             ui.add_space(14.0);
 
@@ -789,13 +855,18 @@ impl eframe::App for App {
             // Input pill pinned to the bottom, chat fills the rest.
             let busy = self.reply.is_some();
             egui::TopBottomPanel::bottom("input").frame(egui::Frame::none().inner_margin(Margin { left: 16.0, right: 16.0, top: 8.0, bottom: 16.0 })).show_inside(ui, |ui| {
-                egui::Frame::none().fill(surface).rounding(Rounding::same(26.0)).inner_margin(Margin { left: 18.0, right: 4.0, top: 4.0, bottom: 4.0 }).show(ui, |ui| {
+                egui::Frame::none().fill(surface).rounding(Rounding::same(26.0)).inner_margin(Margin { left: 4.0, right: 4.0, top: 4.0, bottom: 4.0 }).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let w = ui.available_width() - 52.0;
+                        // The text box fills the whole pill (minus the send button), so a click
+                        // anywhere on the bubble starts typing, not just on its top half.
                         let edit = egui::TextEdit::multiline(&mut self.input)
                             .hint_text(RichText::new("Message The Claww").color(t.muted))
                             .desired_rows(1)
                             .frame(false)
+                            .margin(Margin { left: 14.0, right: 6.0, top: 0.0, bottom: 0.0 })
+                            .min_size(Vec2::new(w, 44.0))
+                            .vertical_align(Align::Center)
                             .desired_width(w)
                             .text_color(t.fg)
                             .font(egui::FontId::proportional(15.5));
@@ -823,11 +894,24 @@ impl eframe::App for App {
             });
 
             egui::CentralPanel::default().frame(egui::Frame::none()).show_inside(ui, |ui| {
+                let chat_rect = ui.max_rect();
                 let stick = std::mem::take(&mut self.scroll_to_bottom);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                     ui.add_space(4.0);
                     let max_w = (ui.available_width() - 32.0) * 0.8;
+                    let font = egui::FontId::proportional(15.5);
+                    let note_font = egui::FontId::proportional(13.0);
+                    let note = "Not finished · you stopped this reply";
                     for m in &self.chat {
+                        // Size each bubble to its own text, capped at 80% of the width.
+                        let mut fit = 0.0f32;
+                        if !m.text.is_empty() {
+                            fit = ui.fonts(|f| f.layout(m.text.clone(), font.clone(), t.fg, max_w).size().x);
+                        }
+                        if m.stopped {
+                            fit = fit.max(ui.fonts(|f| f.layout(note.to_string(), note_font.clone(), t.muted, max_w).size().x));
+                        }
+                        let fit = fit.ceil().clamp(8.0, max_w);
                         let layout = if m.user { Layout::right_to_left(Align::Min) } else { Layout::left_to_right(Align::Min) };
                         ui.with_layout(layout, |ui| {
                             ui.add_space(16.0);
@@ -836,13 +920,15 @@ impl eframe::App for App {
                                 .rounding(Rounding::same(18.0))
                                 .inner_margin(Margin::symmetric(14.0, 10.0))
                                 .show(ui, |ui| {
-                                    ui.set_max_width(max_w);
+                                    ui.set_width(fit);
+                                    ui.set_max_width(fit);
                                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                        ui.set_max_width(fit);
                                         if !m.text.is_empty() {
-                                            ui.add(egui::Label::new(RichText::new(&m.text).size(15.5).color(if m.user { t.on_accent } else { t.fg })).selectable(true).wrap());
+                                            ui.add(egui::Label::new(RichText::new(&m.text).font(font.clone()).color(if m.user { t.on_accent } else { t.fg })).selectable(true).wrap());
                                         }
                                         if m.stopped {
-                                            ui.label(RichText::new("Not finished · you stopped this reply").italics().size(13.0).color(t.muted));
+                                            ui.label(RichText::new(note).italics().font(note_font.clone()).color(t.muted));
                                         }
                                     });
                                 });
@@ -853,6 +939,9 @@ impl eframe::App for App {
                         ui.scroll_to_cursor(Some(Align::BOTTOM));
                     }
                 });
+                // Messages fade out as they scroll up under the header.
+                let band = egui::Rect::from_min_size(chat_rect.min, Vec2::new(chat_rect.width(), 56.0_f32.min(chat_rect.height())));
+                self.paint_top_fade(ui.painter(), full_rect, band);
             });
         });
 
