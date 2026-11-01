@@ -1817,7 +1817,7 @@ class MainActivity : Activity() {
         val maxGb = maxOf(2, (ramB / 1_000_000_000L - 3).toInt())
         val budOn = Switch(this).apply { text = "Use up to"; setTextColor(fg); textSize = 14f; isChecked = budgetGb() > 0 }
         val budVal = TextView(this).apply { setTextColor(fg); textSize = 16f; setTypeface(typeface, Typeface.BOLD); gravity = Gravity.END }
-        val budBar = android.widget.SeekBar(this).apply { max = maxGb - 2; progress = ((if (budgetGb() > 0) budgetGb() else prefs.getInt("budgetLast", minOf(maxGb, (ramB * 0.6 / 1e9).toInt().coerceAtLeast(2)))) - 2).coerceIn(0, maxGb - 2) }
+        val budBar = android.widget.SeekBar(this).apply { setMax(maxGb - 2); setProgress(((if (budgetGb() > 0) budgetGb() else prefs.getInt("budgetLast", minOf(maxGb, (ramB * 0.6 / 1e9).toInt().coerceAtLeast(2)))) - 2).coerceIn(0, maxGb - 2)) }
         val budHw = TextView(this).apply { setTextColor(muted); textSize = 12f; text = "This device: ${"%.0f".format(ramB / 1e9)} GB memory, shared with graphics. Up to $maxGb GB leaves room for the system." }
         val budRes = TextView(this).apply { setTextColor(muted); textSize = 12f; setPadding(0, dp(4), 0, dp(10)) }
         fun budGb() = budBar.progress + 2
