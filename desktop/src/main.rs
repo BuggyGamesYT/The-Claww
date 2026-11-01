@@ -46,6 +46,18 @@ const WALLPAPERS: [(&str, Option<(Color32, Color32)>); 6] = [
     ("Your photo", None),
 ];
 
+/// Tints for Liquid glass bubbles; "Theme" keeps each bubble's own theme colour.
+const GLASS_TINTS: [(&str, Color32); 8] = [
+    ("Theme", rgb(0, 0, 0)),
+    ("Clear", rgb(255, 255, 255)),
+    ("Rose", rgb(255, 110, 160)),
+    ("Violet", rgb(160, 110, 255)),
+    ("Blue", rgb(90, 160, 255)),
+    ("Mint", rgb(90, 230, 180)),
+    ("Amber", rgb(255, 190, 80)),
+    ("Smoke", rgb(40, 40, 50)),
+];
+
 /// Animated wallpapers, drawn every frame.
 const ANIMATED: [&str; 4] = ["Drift", "Lava", "Northern lights", "Stars"];
 
@@ -194,6 +206,8 @@ struct Config {
     bubble: String,
     /// Bubble transparency, 0 (opaque) to 90 percent.
     clear: u8,
+    /// Liquid glass tint, one of GLASS_TINTS.
+    tint: String,
     builtin: bool,
     host: String,
     model: String,
@@ -210,6 +224,7 @@ impl Default for Config {
             dim: 40,
             bubble: "Solid".into(),
             clear: 0,
+            tint: "Theme".into(),
             builtin: true,
             host: String::new(),
             model,
@@ -735,7 +750,10 @@ impl App {
     fn bubble_style(&self, base: Color32) -> (Color32, Stroke, bool) {
         let keep = 1.0 - self.cfg.clear.min(90) as f32 / 100.0;
         if self.cfg.bubble == "Liquid glass" {
-            let tint = mixc(base, Color32::WHITE, 0.18);
+            let tint = match GLASS_TINTS.iter().find(|(n, _)| *n == self.cfg.tint) {
+                Some((n, c)) if *n != "Theme" => *c,
+                _ => mixc(base, Color32::WHITE, 0.18),
+            };
             let a = (0.42 * keep * 255.0).clamp(10.0, 255.0) as u8;
             let fill = Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), a);
             (fill, Stroke::new(1.0, Color32::from_white_alpha((70.0 * keep.max(0.4)) as u8)), true)
@@ -946,6 +964,26 @@ impl App {
                         }
                     }
                 });
+                if self.cfg.bubble == "Liquid glass" {
+                    ui.label(RichText::new("Glass tint").size(12.0).color(t.muted));
+                    ui.horizontal_wrapped(|ui| {
+                        for (name, c) in GLASS_TINTS.iter() {
+                            let sel = self.cfg.tint == *name;
+                            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+                            let p = ui.painter();
+                            if *name == "Theme" {
+                                gradient(p, rect, t.surface, t.accent, true);
+                            } else {
+                                p.circle_filled(rect.center(), 13.0, Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 170));
+                            }
+                            p.circle_stroke(rect.center(), 14.0, if sel { Stroke::new(3.0, t.accent) } else { Stroke::new(1.0, t.muted) });
+                            if resp.on_hover_text(*name).clicked() {
+                                self.cfg.tint = (*name).into();
+                                restyle = true;
+                            }
+                        }
+                    });
+                }
                 ui.label(RichText::new("Bubble transparency").size(12.0).color(t.muted));
                 if ui.add(egui::Slider::new(&mut self.cfg.clear, 0..=90).suffix("%")).changed() {
                     restyle = true;
