@@ -205,6 +205,20 @@ class MainActivity : Activity() {
         if (builtIn) startOllama()
         pollStatus()
         if (intent?.action == "models") openModels()
+        handleShare(intent)
+    }
+
+    /** Files or text shared from another app ("Share to The Claww") land in the open chat, like dragging files onto the desktop app. */
+    @Suppress("DEPRECATION")
+    private fun handleShare(i: Intent?) {
+        if (i == null || (i.action != Intent.ACTION_SEND && i.action != Intent.ACTION_SEND_MULTIPLE)) return
+        val uris: List<Uri> = if (i.action == Intent.ACTION_SEND) listOfNotNull(i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
+            else i.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: emptyList()
+        val shared = i.getStringExtra(Intent.EXTRA_TEXT)
+        i.action = null // handled once, even if the activity is recreated
+        val pane = if (curTab == 2 && projFrame.getChildAt(2).visibility == View.VISIBLE) projPane else { goTab(1); chatPane }
+        uris.forEach { importAttachment(pane, it) }
+        if (uris.isEmpty() && !shared.isNullOrBlank()) pane.input.append(shared)
     }
 
     /** Material You: palette taken from the system's wallpaper-based dynamic colors (Android 12+), following dark/light mode. */
@@ -222,7 +236,34 @@ class MainActivity : Activity() {
             c(android.R.color.system_accent1_600), c(android.R.color.system_accent1_0))
     }
 
-    private fun allThemes(): List<Theme> = listOfNotNull(materialYou()) + themes
+    /** "Custom accent": Ember surfaces with any accent color the user picks (same as the desktop app). */
+    private fun customAccentTheme(): Theme {
+        val a = prefs.getInt("customAccent", Color.rgb(124, 156, 255))
+        val lum = (0.299 * Color.red(a) + 0.587 * Color.green(a) + 0.114 * Color.blue(a)) / 255
+        return themes[0].copy(name = "Custom accent", accent = a, onAccent = if (lum > 0.6) Color.BLACK else Color.WHITE)
+    }
+
+    private fun allThemes(): List<Theme> = listOfNotNull(materialYou()) + themes + customAccentTheme()
+
+    /** Wallpaper and glass settings cleared by "Reset wallpaper & glass" (Look) or Ctrl+Shift+R. Theme, chats and projects stay. */
+    private val lookKeys = listOf("wall", "wallUri", "wallVideo", "blur", "dim", "glass", "glassStyle", "glassBlur", "glassRim", "glassTint", "glassStrength", "bubbleOpacity")
+    private fun resetLook() { prefs.edit().apply { lookKeys.forEach { remove(it) } }.apply(); recreate() }
+
+    /** Hardware keyboard (tablets, Chromebooks): Ctrl+1/2/3 switch tabs, Ctrl+Shift+R resets wallpaper and glass, like the desktop app. */
+    override fun dispatchKeyEvent(e: android.view.KeyEvent): Boolean {
+        if (e.action == android.view.KeyEvent.ACTION_DOWN && e.isCtrlPressed) {
+            when (e.keyCode) {
+                android.view.KeyEvent.KEYCODE_1, android.view.KeyEvent.KEYCODE_2, android.view.KeyEvent.KEYCODE_3 -> {
+                    goTab(maxOf(e.keyCode - android.view.KeyEvent.KEYCODE_1, if (wide) 1 else 0)); return true
+                }
+                android.view.KeyEvent.KEYCODE_R -> if (e.isShiftPressed) {
+                    android.widget.Toast.makeText(this, "Wallpaper and glass are back to defaults", android.widget.Toast.LENGTH_SHORT).show()
+                    resetLook(); return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(e)
+    }
 
     private fun styleTabs(sel: Int) {
         prefs.edit().putInt("tab", sel).apply()
@@ -321,6 +362,14 @@ class MainActivity : Activity() {
 
     private fun refreshHome() {
         homeList.removeAllViews(); liveUpdaters.clear()
+        // New releases since the last check (set by the background model watcher), like the desktop's Home card.
+        val fresh = try { JSONArray(prefs.getString("newModelNames", "[]")).let { a -> (0 until a.length()).map { a.getString(it) } } } catch (_: Exception) { emptyList() }
+        if (fresh.isNotEmpty()) homeList.addView(card().apply {
+            addView(text("NEW AI MODELS", 11f, muted, true).apply { letterSpacing = 0.08f; setPadding(0, 0, 0, dp(8)) })
+            addView(text("${fresh.size} new model${if (fresh.size == 1) "" else "s"} released", 18f, fg, true))
+            addView(text(fresh.joinToString(", "), 13f, muted).apply { setPadding(0, dp(4), 0, 0) })
+            setOnClickListener { openModels() }
+        }, cardLp())
         val list = widgets()
         list.forEachIndexed { i, w ->
             val v = buildWidget(w)
@@ -345,7 +394,7 @@ class MainActivity : Activity() {
             setOnClickListener { addWidget() }
         }
         homeList.addView(add, cardLp())
-        homeList.addView(text("Long-press a widget to move or remove it. Swipe left or right to switch tabs.", 12f, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0) })
+        homeList.addView(text("Long-press a widget to move or remove it. Swipe left or right to switch tabs. Long-press the empty message box to reuse an earlier message.", 12f, muted).apply { gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0) })
         liveUpdaters.forEach { it() }
     }
 
@@ -516,6 +565,7 @@ class MainActivity : Activity() {
         projDetail.addView(card().apply {
             addView(text("PROJECT NOTES", 11f, muted, true).apply { letterSpacing = 0.08f })
             addView(text(p.notes.ifBlank { "Tap to add goals, context or rules claw should follow in this project." }, 14f, if (p.notes.isBlank()) muted else fg).apply { setPadding(0, dp(6), 0, 0) })
+            addView(text("Folder: " + File(filesDir, "projects/${p.id}").absolutePath, 11f, muted).apply { setPadding(0, dp(8), 0, 0) })
             setOnClickListener { ask("Project notes", "Goals, context, rules", p.notes, true) { p.notes = it; Store.saveProjects(); showProjectDetail(p) } }
         }, cardLp())
         projDetail.addView(LinearLayout(this).apply {
@@ -658,6 +708,20 @@ class MainActivity : Activity() {
                 }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) })
             }
         }
+        /** Earlier messages you sent in this chat, oldest first. */
+        private fun sentMsgs() = Store.msgs(conv).filter { it.user && it.text.isNotBlank() }.map { it.text }
+        private var hist: Int? = null
+        private var histDraft = ""
+        private fun recall(s: String) { input.setText(s); input.setSelection(s.length) }
+        @android.annotation.TargetApi(31)
+        private fun acceptPastedFiles() {
+            input.setOnReceiveContentListener(arrayOf("image/*", "video/*", "application/*")) { _, payload ->
+                val parts = payload.partition { it.uri != null }
+                parts.first?.clip?.let { cl -> for (i in 0 until cl.itemCount) cl.getItemAt(i).uri?.let { importAttachment(this@ChatPane, it) } }
+                parts.second
+            }
+        }
+
         init {
             // Sub-header: back (projects) · title + status · history / new
             val head = LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(2), dp(12), dp(6)) }
@@ -694,6 +758,39 @@ class MainActivity : Activity() {
                 background = null; textSize = 16f; maxLines = 6; minHeight = dp(44)
                 setPadding(dp(16), dp(10), dp(8), dp(10))
             }
+            // Touch version of the desktop's Up/Down recall: long-press the empty box to pick an earlier message (Paste stays first).
+            input.setOnLongClickListener {
+                if (input.text.isNotEmpty()) return@setOnLongClickListener false
+                val sent = sentMsgs().asReversed().distinct()
+                if (sent.isEmpty()) return@setOnLongClickListener false
+                val clip = (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).hasPrimaryClip()
+                val items = (if (clip) listOf("Paste") else emptyList()) + sent.map { it.replace('\n', ' ').let { s -> if (s.length > 120) s.take(119) + "…" else s } }
+                AlertDialog.Builder(this@MainActivity, dialogStyle).setTitle("Earlier messages")
+                    .setItems(items.toTypedArray()) { _, i -> if (clip && i == 0) input.onTextContextMenuItem(android.R.id.paste) else recall(sent[i - if (clip) 1 else 0]) }
+                    .setNegativeButton("Cancel", null).show()
+                true
+            }
+            // Hardware keyboard: Up/Down recall earlier messages when the caret is on the first/last line, like the desktop app.
+            input.setOnKeyListener { _, code, ev ->
+                val up = code == android.view.KeyEvent.KEYCODE_DPAD_UP
+                if (ev.action != android.view.KeyEvent.ACTION_DOWN || !(up || code == android.view.KeyEvent.KEYCODE_DPAD_DOWN) || ev.isShiftPressed || ev.isAltPressed || ev.isCtrlPressed) return@setOnKeyListener false
+                val v = input.text.toString(); val c = input.selectionStart
+                if (c < 0 || input.selectionEnd != c) return@setOnKeyListener false
+                val sent = sentMsgs()
+                if (up) {
+                    if (v.substring(0, c).contains('\n') || sent.isEmpty()) return@setOnKeyListener false
+                    val cur = hist ?: sent.size.also { histDraft = v }
+                    if (cur == 0) { hist = 0; return@setOnKeyListener false }
+                    hist = cur - 1; recall(sent[cur - 1]); true
+                } else {
+                    val cur = hist ?: return@setOnKeyListener false
+                    if (v.substring(c).contains('\n')) return@setOnKeyListener false
+                    if (cur + 1 >= sent.size) { hist = null; recall(histDraft) } else { hist = cur + 1; recall(sent[cur + 1]) }
+                    true
+                }
+            }
+            // Paste photos, videos or files into the message box (clipboard or keyboard), like pasting on the desktop.
+            if (Build.VERSION.SDK_INT >= 31) acceptPastedFiles()
             val plusBtn = FrameLayout(this@MainActivity).apply {
                 background = round(surface2, 22)
                 addView(Glyph(this@MainActivity, "plus", fg), FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
@@ -859,7 +956,7 @@ class MainActivity : Activity() {
         }
 
         fun open(c: Conv) {
-            conv = c
+            conv = c; hist = null
             bubbleViews.clear(); saved.clear(); hits = emptyList()
             if (mode == null) prefs.edit().putString("curChat", c.id).apply()
             chat.removeAllViews(); pending.clear(); renderPending()
@@ -965,7 +1062,7 @@ class MainActivity : Activity() {
             val msg = input.text.toString().trim()
             val atts = pending.toList()
             if (msg.isEmpty() && atts.isEmpty()) return
-            input.setText(""); pending.clear(); renderPending(); hideKeyboard()
+            input.setText(""); hist = null; pending.clear(); renderPending(); hideKeyboard()
 
             // "create a project called X" from the regular chat.
             if (mode == null && atts.isEmpty()) {
@@ -1005,6 +1102,9 @@ class MainActivity : Activity() {
                 fun show() { val s = sb.toString().trim(); val live = s.startsWith(ToolSteps.LIVE); val txt = s.removePrefix(ToolSteps.LIVE)
                     runOnUiThread {
                         out.text = txt.ifEmpty { "…" }
+                        // Same padding as message bubbles, width follows the label as it changes.
+                        out.setPadding(dp(14), dp(10), dp(14), dp(10))
+                        out.layoutParams = out.layoutParams.apply { width = WRAP_CONTENT }
                         if (live) {
                             out.setTextColor(muted)
                             out.background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = dp(22).toFloat(); setStroke(dp(1), withAlpha(fg, 50)); setColor(withAlpha(surface2, 110)) }
@@ -1254,6 +1354,15 @@ class MainActivity : Activity() {
         if (guessMime(f.name).startsWith("image/")) {
             val iv = ImageView(this).apply { adjustViewBounds = true; setImageBitmap(loadScaled(f.absolutePath, 1600)) }
             AlertDialog.Builder(this, dialogStyle).setView(iv).setPositiveButton("Close", null).show()
+        } else if (guessMime(f.name).startsWith("video/")) {
+            // Plays in place (tap to pause or resume), like the desktop app.
+            val vv = android.widget.VideoView(this).apply {
+                setVideoPath(f.absolutePath); setOnPreparedListener { start() }
+                setOnTouchListener { v, ev -> if (ev.action == android.view.MotionEvent.ACTION_UP) { if (isPlaying) pause() else start(); v.performClick() }; true }
+            }
+            val wrap = FrameLayout(this).apply { setPadding(dp(8), dp(8), dp(8), 0); addView(vv, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.CENTER)) }
+            AlertDialog.Builder(this, dialogStyle).setTitle(f.name).setView(wrap).setPositiveButton("Close", null)
+                .setOnDismissListener { vv.stopPlayback() }.show()
         } else android.widget.Toast.makeText(this, "${f.name} · ${f.length() / 1024} KB", android.widget.Toast.LENGTH_SHORT).show()
     }
 
@@ -1425,7 +1534,7 @@ class MainActivity : Activity() {
             }
             memNote.text = (if (cur == 0) "Auto lets Ollama pick." else "${memOpts.first { it.first == cur }.second} tokens of memory.") +
                 " Bigger uses more RAM and can be slower; 32K suits web searches on ${"%.0f".format(ramGb)} GB." +
-                (if (builtIn) "" else " Applies to the Ollama on this device only; on a PC set OLLAMA_CONTEXT_LENGTH.")
+                (if (builtIn) "" else " Applies to the Ollama on this device only; on a PC, use the Memory setting in The Claww desktop app.")
         }
         paintMem()
         box.addView(memRow); box.addView(memNote)
@@ -1506,7 +1615,7 @@ class MainActivity : Activity() {
         val selected = LinkedHashMap<String, Long>()
         var installed = setOf<String>()
         val newSet = prefs.getStringSet("newModels", emptySet())!!.toSet()
-        prefs.edit().putStringSet("newModels", emptySet()).apply()
+        prefs.edit().putStringSet("newModels", emptySet()).remove("newModelNames").apply()
 
         val rootV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(t.bg); setPadding(dp(16), dp(14), dp(16), dp(10)) }
         fun tv(s: String, size: Float, c: Int = fg, bold: Boolean = false) = TextView(this).apply { text = s; textSize = size; setTextColor(c); if (bold) typeface = Typeface.DEFAULT_BOLD }
@@ -1723,7 +1832,7 @@ class MainActivity : Activity() {
         }
         Downloads.listen(dlListener)
         Downloads.onFinished = { refreshInstalled() }
-        dlg.setOnDismissListener { Downloads.unlisten(dlListener) }
+        dlg.setOnDismissListener { Downloads.unlisten(dlListener); refreshHome() }
         renderFilters(); dlListener()
         refreshInstalled { load(true) }
         dlg.setContentView(rootV)
@@ -1735,6 +1844,7 @@ class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (intent.action == "models") openModels()
+        handleShare(intent)
     }
 
     // ===================== Themes & wallpapers =====================
@@ -1819,7 +1929,12 @@ class MainActivity : Activity() {
         box.addView(label("Theme"))
         box.addView(swatchRow(allThemes().map { th ->
             th.name to GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(th.surface, th.accent))
-        }, t.name) { prefs.edit().putString("theme", it).apply(); dialog?.dismiss(); recreate() })
+        }, t.name) { name ->
+            dialog?.dismiss()
+            if (name == "Custom accent") pickColor("Accent color", prefs.getInt("customAccent", Color.rgb(124, 156, 255)), false) { c ->
+                prefs.edit().putInt("customAccent", c).putString("theme", name).apply(); recreate()
+            } else { prefs.edit().putString("theme", name).apply(); recreate() }
+        })
         box.addView(label("Wallpaper"))
         box.addView(swatchRow(wallpapers.map { (name, g) ->
             name to (if (g != null) GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, g)
@@ -1885,18 +2000,25 @@ class MainActivity : Activity() {
                 override fun onStopTrackingTouch(sb: android.widget.SeekBar) { prefs.edit().putInt("dim", sb.progress).apply(); dialog?.dismiss(); recreate() }
             })
         })
+        box.addView(chip("Reset wallpaper & glass") { dialog?.dismiss(); resetLook() }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = dp(18) })
+        box.addView(TextView(this).apply { text = "Keeps your theme, chats and projects."; setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(4)) })
         dialog = AlertDialog.Builder(this, dialogStyle).setTitle("Look").setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("Done", null).show()
     }
 
     /** Any-color glass tint: hue, saturation and brightness sliders with a live glass preview. */
-    private fun pickGlassColor() {
-        val hsv = FloatArray(3); Color.colorToHSV(prefs.getInt("glassCustom", Color.rgb(120, 200, 255)), hsv)
+    private fun pickGlassColor() = pickColor("Glass color", prefs.getInt("glassCustom", Color.rgb(120, 200, 255)), true) { c ->
+        prefs.edit().putInt("glassCustom", c).putString("glassTint", "Custom").putBoolean("glass", true).apply(); recreate()
+    }
+
+    /** Hue, saturation and brightness sliders with a live preview ([asGlass] = preview as a glass pane, else a solid swatch). */
+    private fun pickColor(title: String, initial: Int, asGlass: Boolean, onUse: (Int) -> Unit) {
+        val hsv = FloatArray(3); Color.colorToHSV(initial, hsv)
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(8)) }
         val preview = View(this)
         val previewWrap = FrameLayout(this).apply { background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(t.accent, t.bg)).apply { cornerRadius = dp(18).toFloat() }; setPadding(dp(18), dp(18), dp(18), dp(18)); addView(preview, FrameLayout.LayoutParams(MATCH_PARENT, dp(56))) }
         fun color() = Color.HSVToColor(hsv)
-        fun update() { preview.background = glass(18, color()) }
+        fun update() { preview.background = if (asGlass) glass(18, color()) else round(color(), 18) }
         box.addView(previewWrap)
         listOf(Triple("Hue", 0, 360), Triple("Saturation", 1, 100), Triple("Brightness", 2, 100)).forEach { (name, i, max) ->
             box.addView(TextView(this).apply { text = name; setTextColor(muted); textSize = 12f; setPadding(0, dp(14), 0, dp(4)) })
@@ -1910,8 +2032,8 @@ class MainActivity : Activity() {
             })
         }
         update()
-        AlertDialog.Builder(this, dialogStyle).setTitle("Glass color").setView(ScrollView(this).apply { addView(box) })
-            .setPositiveButton("Use") { _, _ -> prefs.edit().putInt("glassCustom", color()).putString("glassTint", "Custom").putBoolean("glass", true).apply(); recreate() }
+        AlertDialog.Builder(this, dialogStyle).setTitle(title).setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Use") { _, _ -> onUse(color()) }
             .setNegativeButton("Cancel", null).show()
     }
 

@@ -204,11 +204,87 @@ fn sys_info() -> serde_json::Value {
     })
 }
 
-#[tauri::command]
-fn start_ollama() -> Result<(), String> {
+fn spawn_ollama_serve(ctx_len: u32, clear_when_auto: bool) -> Result<(), String> {
     let mut c = Command::new("ollama");
     c.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    if ctx_len > 0 { c.env("OLLAMA_CONTEXT_LENGTH", ctx_len.to_string()); } else if clear_when_auto { c.env_remove("OLLAMA_CONTEXT_LENGTH"); }
     no_window(&mut c).spawn().map(|_| ()).map_err(|e| format!("couldn't run `ollama serve`: {e}. Is Ollama installed?"))
+}
+
+#[tauri::command]
+fn start_ollama(ctx_len: Option<u32>) -> Result<(), String> {
+    spawn_ollama_serve(ctx_len.unwrap_or(0), false)
+}
+
+fn mem_label(n: u32) -> String { if n == 0 { "Auto".into() } else { format!("{}K", n / 1024) } }
+
+/// Memory setting: sets OLLAMA_CONTEXT_LENGTH for this PC's Ollama (0 = Auto, removes it) and restarts Ollama.
+#[tauri::command]
+async fn set_ollama_memory(ctx_len: u32) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || apply_memory(ctx_len)).await.map_err(|e| e.to_string())?
+}
+
+#[allow(unreachable_code)]
+fn apply_memory(n: u32) -> Result<String, String> {
+    let done = || format!("Memory set to {}. Ollama restarted.", mem_label(n));
+    #[cfg(target_os = "linux")]
+    {
+        let has_unit = Command::new("systemctl").args(["list-unit-files", "ollama.service", "--no-legend"]).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("ollama.service")).unwrap_or(false);
+        if !has_unit {
+            // No Ollama system service: restart a user-run `ollama serve` with the new setting.
+            let _ = Command::new("pkill").args(["-x", "ollama"]).status();
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            spawn_ollama_serve(n, true)?;
+            return Ok(format!("Memory set to {}. No Ollama system service was found, so The Claww restarted `ollama serve` with it.", mem_label(n)));
+        }
+        let dir = "/etc/systemd/system/ollama.service.d";
+        let script = if n > 0 {
+            format!("mkdir -p {dir} && printf '[Service]\\nEnvironment=\"OLLAMA_CONTEXT_LENGTH={n}\"\\n' > {dir}/claww-memory.conf && systemctl daemon-reload && systemctl restart ollama")
+        } else {
+            format!("rm -f {dir}/claww-memory.conf && systemctl daemon-reload && systemctl restart ollama")
+        };
+        let out = Command::new("pkexec").args(["sh", "-c", &script]).output()
+            .map_err(|e| format!("couldn't run pkexec ({e}). Install polkit, or add Environment=\"OLLAMA_CONTEXT_LENGTH={n}\" to the ollama service yourself."))?;
+        return match out.status.code() {
+            Some(0) => Ok(done()),
+            Some(126) | Some(127) => Err("the password prompt was cancelled or not allowed, so nothing changed.".into()),
+            c => {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                Err(if err.is_empty() { format!("the change failed (exit code {}).", c.unwrap_or(-1)) } else { err })
+            }
+        };
+    }
+    #[cfg(windows)]
+    {
+        let v = n.to_string();
+        if n > 0 {
+            let ok = no_window(Command::new("setx").args(["OLLAMA_CONTEXT_LENGTH", v.as_str()])).stdout(Stdio::null()).stderr(Stdio::null())
+                .status().map(|s| s.success()).unwrap_or(false);
+            if !ok { return Err("couldn't save OLLAMA_CONTEXT_LENGTH (setx failed).".into()); }
+            std::env::set_var("OLLAMA_CONTEXT_LENGTH", &v);
+        } else {
+            // Auto: remove the user variable (fine if it was never set).
+            let _ = no_window(Command::new("reg").args(["delete", "HKCU\\Environment", "/v", "OLLAMA_CONTEXT_LENGTH", "/f"])).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            std::env::remove_var("OLLAMA_CONTEXT_LENGTH");
+        }
+        for im in ["ollama app.exe", "ollama.exe"] {
+            let _ = no_window(Command::new("taskkill").args(["/F", "/IM", im])).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let app = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Programs").join("Ollama").join("ollama app.exe"));
+        if let Some(app) = app.filter(|p| p.exists()) {
+            // Started from here, Ollama inherits this process's environment, so pass the new value directly.
+            let mut c = Command::new(app);
+            if n > 0 { c.env("OLLAMA_CONTEXT_LENGTH", &v); } else { c.env_remove("OLLAMA_CONTEXT_LENGTH"); }
+            c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("saved, but couldn't restart Ollama: {e}"))?;
+        } else {
+            spawn_ollama_serve(n, true).map_err(|e| format!("saved, but {e}"))?;
+        }
+        return Ok(done());
+    }
+    let _ = &done;
+    Err("The Memory setting works on Windows and Linux.".into())
 }
 
 fn main() {
@@ -221,7 +297,7 @@ fn main() {
     tauri::Builder::default()
         .manage(Jobs::default())
         .manage(Awake::default())
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama, keep_awake])
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, keep_awake])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }

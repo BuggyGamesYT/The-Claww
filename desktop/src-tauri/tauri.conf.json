@@ -3,19 +3,52 @@
   "productName": "The Claww",
   "version": "0.3.0",
   "identifier": "com.buggygamesyt.theclaww",
-  "build": { "frontendDist": "../ui" },
+  "build": {
+    "frontendDist": "../ui"
+  },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "label": "main", "title": "The Claww", "width": 1120, "height": 800, "minWidth": 420, "minHeight": 560 }],
-    "security": { "csp": null, "assetProtocol": { "enable": true, "scope": ["**"] } }
+    "windows": [
+      {
+        "label": "main",
+        "title": "The Claww",
+        "width": 1280,
+        "height": 840,
+        "minWidth": 420,
+        "minHeight": 560,
+        "maximized": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "externalBin": ["binaries/claw"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/claw"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Local AI agent with Ollama",
-    "linux": { "deb": { "depends": [] } }
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
   }
 }

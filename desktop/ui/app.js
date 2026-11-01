@@ -190,6 +190,10 @@ function startAnimated(wall, kind, bg, cols) {
   st.raf = requestAnimationFrame(frame);
 }
 
+// Wallpaper and glass settings, cleared by "Reset wallpaper & glass" (Look), Ctrl+Shift+R or --reset-look. Chats and projects stay.
+const LOOK_KEYS = ["wall", "wallPath", "wallVideo", "videoBoot", "blur", "dim", "glass", "glassStyle", "glassBlur", "glassRim", "glassTint", "glassStrength", "bubbleOpacity"];
+function resetLook() { LOOK_KEYS.forEach(k => localStorage.removeItem("claww." + k)); applyLook(); }
+
 // ---------- modal helpers ----------
 function modal(title, body, buttons = [["Done", null, true]]) {
   const sheet = $("#sheet"); sheet.innerHTML = "";
@@ -368,7 +372,9 @@ function buildWidget(w, i) {
       liveUpdaters.push(async () => {
         try { SYS = await invoke("sys_info"); } catch { return; }
         name.textContent = SYS.host ? `${SYS.host} · ${SYS.os}` : SYS.os;
-        stats.textContent = `${SYS.cpu} · ${SYS.cores} threads\nRAM ${(SYS.memFree / 1e9).toFixed(1)} GB free of ${(SYS.memTotal / 1e9).toFixed(0)} GB`;
+        let bat = "";
+        try { if (navigator.getBattery) { const b = await navigator.getBattery(); if (b && !(b.charging && b.level === 1 && b.chargingTime === 0)) bat = ` · Battery ${Math.round(b.level * 100)}%`; } } catch {}
+        stats.textContent = `${SYS.cpu} · ${SYS.cores} threads\nRAM ${(SYS.memFree / 1e9).toFixed(1)} GB free of ${(SYS.memTotal / 1e9).toFixed(0)} GB${bat}`;
       });
       break;
     }
@@ -619,7 +625,7 @@ function ChatPane(root, projectMode) {
   sBox.firstChild.innerHTML = SEARCH;
   const head = h("div", { class: "pane-head" },
     projectMode ? h("button", { class: "back", onclick: () => openProject ? showProjectDetail(openProject) : showProjectList() }, "‹") : null,
-    h("div", { class: "grow" }, title, h("div", { class: "status", onclick: () => status.ok ? openSettings() : invoke("start_ollama").then(() => setTimeout(pollStatus, 1500)).catch(e => modal("Ollama", h("div", {}, String(e)))) }, dot, stxt)),
+    h("div", { class: "grow" }, title, h("div", { class: "status", onclick: () => status.ok ? openSettings() : invoke("start_ollama", { ctxLen: P.get("ctxLen", 0) }).then(() => setTimeout(pollStatus, 1500)).catch(e => modal("Ollama", h("div", {}, String(e)))) }, dot, stxt)),
     sBox,
     projectMode ? null : h("button", { class: "chip", onclick: showHistory }, "Chats"),
     h("button", { class: "chip", onclick: () => { if (!busy) self.open(Store.newConv(projectMode ? conv.project : null)); } }, "New"));
@@ -865,6 +871,33 @@ function ChatPane(root, projectMode) {
 }
 
 // ---------- settings ----------
+// Memory (context length) for this PC's Ollama. Same choices as the Android app.
+const MEM_OPTS = [[0, "Auto"], [8192, "8K"], [16384, "16K"], [32768, "32K"], [65536, "64K"], [131072, "128K"]];
+const isLocalHost = u => /^(https?:\/\/)?(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i.test(u.trim());
+function memorySection(hostNow) {
+  const row = h("div", { class: "memrow" }), note = h("div", { class: "muted", style: "margin-top:6px" }), st = h("div", { class: "muted", style: "margin-top:4px" });
+  let applying = false;
+  const paint = () => {
+    const cur = P.get("ctxLen", 0); row.innerHTML = "";
+    MEM_OPTS.forEach(([v, l]) => row.append(h("button", { class: "chip" + (v === cur ? " on" : ""), disabled: applying ? "" : null, onclick: () => apply(v) }, l)));
+    const ram = SYS ? (SYS.memTotal / 1e9).toFixed(0) : "?";
+    note.textContent = (cur === 0 ? "Auto lets Ollama pick." : `${(MEM_OPTS.find(o => o[0] === cur) || [0, cur])[1]} tokens of memory.`) +
+      ` Bigger uses more RAM and can be slower; 32K suits web searches on ${ram} GB. Changing it restarts Ollama on this PC` +
+      (/Linux/.test(navigator.userAgent) ? " (asks for your password once)." : ".") +
+      (isLocalHost(hostNow()) ? "" : " Your Ollama address points to another computer: this only applies to this PC's Ollama.");
+  };
+  async function apply(v) {
+    const prev = P.get("ctxLen", 0);
+    if (applying || v === prev) return;
+    applying = true; P.set("ctxLen", v); paint();
+    st.style.color = ""; st.textContent = "Applying…";
+    try { st.textContent = await invoke("set_ollama_memory", { ctxLen: v }); setTimeout(pollStatus, 2500); }
+    catch (e) { P.set("ctxLen", prev); st.style.color = "#eb5a50"; st.textContent = "Couldn't change memory: " + e; }
+    applying = false; paint();
+  }
+  paint();
+  return [lbl("Memory · how much of the chat and web pages the model can hold"), row, note, st];
+}
 function openSettings() {
   const host = h("input", { class: "field", placeholder: "http://127.0.0.1:11434" }); host.value = S.host;
   const model = h("input", { class: "field", placeholder: "llama3.2:3b" }); model.value = S.model;
@@ -897,8 +930,9 @@ function openSettings() {
   } }, "Download model");
   const body = h("div", {}, lbl("Ollama address"), host, lbl("Model in use"), model, lbl("Installed models · click one to use it"), mq, installed,
     lbl("Right model for the task"), toggle("Auto-switch to a good installed model for each task (coding, photos, math, writing)", "autoSwitch", false),
-    toggle("Suggest a better model to download when one would do the task better", "suggestModels", true, v => { if (v) P.set("noSuggest", []); }), h("div", { class: "muted", style: "margin-top:8px" }, tip), pull, prog, pst,
-    h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama").then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
+    toggle("Suggest a better model to download when one would do the task better", "suggestModels", true, v => { if (v) P.set("noSuggest", []); }), h("div", { class: "muted", style: "margin-top:8px" }, tip),
+    ...memorySection(() => host.value.trim() || S.host), pull, prog, pst,
+    h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama", { ctxLen: P.get("ctxLen", 0) }).then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
     h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"));
   modal("Settings", body, [["Done", save, true]]);
   refresh();
@@ -935,6 +969,8 @@ function openLook() {
   }));
   body.append(...slider("Glass tint strength", "glassStrength", 30, 100));
   body.append(...slider("Glass blur", "glassBlur", 45, 100), ...slider("Glass outline", "glassRim", 30, 100));
+  body.append(h("button", { class: "chip", style: "margin-top:16px", onclick: () => { resetLook(); openLook(); } }, "Reset wallpaper & glass"),
+    h("div", { class: "muted", style: "margin-top:6px" }, "Keeps your theme, chats and projects. Shortcut: Ctrl+Shift+R."));
   modal("Look", body);
 }
 function pickWallFile(accept, key, wallName) {
@@ -1156,7 +1192,7 @@ let chatPane, projPane;
 (async () => {
   try { PATHS = await invoke("paths"); PATHS.data = String(PATHS.data).replace(/\\/g, "/"); PATHS.workspace = String(PATHS.workspace).replace(/\\/g, "/"); } catch {}
   try { SYS = await invoke("sys_info"); } catch {}
-  if (PATHS.resetLook) ["wall", "wallPath", "wallVideo", "videoBoot", "blur", "dim", "glass", "glassStyle", "glassBlur", "glassRim"].forEach(k => localStorage.removeItem("claww." + k));
+  if (PATHS.resetLook) LOOK_KEYS.forEach(k => localStorage.removeItem("claww." + k));
   applyLook();
   $("#btnSettings").onclick = openSettings; $("#btnLook").onclick = openLook; $("#btnModels").onclick = openModels;
   chatPane = ChatPane($("#chat"), false);
@@ -1170,10 +1206,10 @@ let chatPane, projPane;
   renderHome();
   if (PATHS.clawFound === false) chatPane.input.placeholder = "claw binary missing from this install";
   // Try to start Ollama once if it isn't running locally.
-  try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama").catch(() => {}); }
+  try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", { ctxLen: P.get("ctxLen", 0) }).catch(() => {}); }
   pollStatus(); setInterval(pollStatus, 4000);
   checkNewModels(false); setInterval(() => checkNewModels(false), 30 * 60000);
   addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
   // Ctrl+Shift+R: reset wallpaper and glass look (keeps chats and projects).
-  addEventListener("keydown", e => { if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "r") { e.preventDefault(); ["wall", "wallPath", "wallVideo", "videoBoot", "blur", "dim", "glass", "glassStyle", "glassBlur", "glassRim"].forEach(k => localStorage.removeItem("claww." + k)); applyLook(); modal("Look reset", h("div", {}, "Wallpaper and glass are back to defaults. Your chats and projects are untouched.")); } });
+  addEventListener("keydown", e => { if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "r") { e.preventDefault(); resetLook(); modal("Look reset", h("div", {}, "Wallpaper and glass are back to defaults. Your chats and projects are untouched.")); } });
 })();

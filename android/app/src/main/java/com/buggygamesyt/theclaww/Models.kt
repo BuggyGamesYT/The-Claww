@@ -139,7 +139,8 @@ object Catalog {
         val fresh = latest.filter { it.source + ":" + it.id !in seen }
         seen += latest.map { it.source + ":" + it.id }
         prefs.edit().putStringSet("seenModels", seen.toList().takeLast(3000).toSet()).putLong("lastModelCheck", System.currentTimeMillis())
-            .putStringSet("newModels", (prefs.getStringSet("newModels", emptySet())!! + fresh.map { it.source + ":" + it.id }).toList().takeLast(200).toSet()).apply()
+            .putStringSet("newModels", (prefs.getStringSet("newModels", emptySet())!! + fresh.map { it.source + ":" + it.id }).toList().takeLast(200).toSet())
+            .apply { if (!first && fresh.isNotEmpty()) putString("newModelNames", JSONArray(fresh.take(6).map { it.title }).toString()) }.apply()
         return if (first) emptyList() else fresh
     }
 
@@ -156,7 +157,7 @@ object Catalog {
                         val nm = app.getSystemService(NotificationManager::class.java)
                         nm.createNotificationChannel(NotificationChannel("claww-new", "New AI models", NotificationManager.IMPORTANCE_DEFAULT))
                         val open = PendingIntent.getActivity(app, 3, Intent(app, MainActivity::class.java).setAction("models"), PendingIntent.FLAG_IMMUTABLE)
-                        nm.notify(3, Notification.Builder(app, "claww-new").setSmallIcon(android.R.drawable.star_on)
+                        nm.notify(3, Notification.Builder(app, "claww-new").setSmallIcon(R.drawable.ic_stat_claww)
                             .setContentTitle("${fresh.size} new AI model${if (fresh.size == 1) "" else "s"} available")
                             .setContentText(fresh.take(4).joinToString(", ") { it.title }).setContentIntent(open).setAutoCancel(true).build())
                     } catch (_: Exception) {}

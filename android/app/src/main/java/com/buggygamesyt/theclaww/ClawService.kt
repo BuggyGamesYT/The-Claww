@@ -29,7 +29,7 @@ class ClawService : Service() {
         val n = Notification.Builder(this, "claww")
             .setContentTitle("The Claww is running")
             .setContentText("Ollama stays ready in the background")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_stat_claww)
             .setContentIntent(open).setOngoing(true)
             .addAction(Notification.Action.Builder(null, "Stop Ollama", stop).build())
             .build()
