@@ -746,6 +746,12 @@ async function ollamaBack(ms = 20000) {
 const ollamaCrashNote = (m, retried) => `Ollama stopped while running ${m}` + (retried ? ", even with less memory" : " and didn't come back") +
   ". That almost always means the model plus your photos or video didn't fit in memory. Try a smaller model for this task in Settings › Models for tasks (like gemma3:4b or qwen2.5vl:3b), or lower Memory, then send it again.";
 
+// Small models often forget they can search: remind them (with today's date) on every tool chat.
+const toolHint = nudge => `Today is ${new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. ` +
+  "You can use tools: WebSearch and WebFetch for anything current or online (weather, news, prices, scores, hours, facts you're unsure of), bash for commands and files. Never say you lack internet or real-time access; search instead." +
+  (nudge ? " Your last answer said you couldn't look this up. You can: call WebSearch now, then answer from the results." : "") + "\n\n";
+const saysNoWeb = t => /(real[- ]time|up[- ]to[- ]date|current) (weather|data|information|info|news|prices?)|(don'?t|do not|can'?t|cannot|unable to) (have )?(access|browse|search|check|look up|retrieve)[^.]{0,40}(internet|web|online|real[- ]time|external|current)|as an ai[^.]{0,40}(no|not|don'?t)[^.]{0,30}(internet|real[- ]time)/i.test(String(t || ""));
+
 async function installedModels() { try { return (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).map(m => m.name); } catch { return null; } }
 
 // ---------- What each model can do (Ollama /api/show "capabilities"), cached per model + digest ----------
@@ -1238,7 +1244,7 @@ function ChatPane(root, projectMode) {
       };
       await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: runModel, stream: true, messages, ...keep, ...(Object.keys(opts).length ? { options: opts } : {}) }), event: "chat-line" });
     };
-    const runClaw = async () => {
+    const runClaw = async (o = {}) => {
       job = uid();
       let files = "";
       for (const a of atts) {
@@ -1246,7 +1252,7 @@ function ChatPane(root, projectMode) {
       }
       const body = (text || "Please look at the attached file(s).") + files;
       const ctx = context(prior);
-      const prompt = preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
+      const prompt = toolHint(o.nudge) + preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
       // claw answers with one JSON line at the end: show only the reply plus a short line per tool used.
       let raw = "";
       thinking();
@@ -1266,6 +1272,8 @@ function ChatPane(root, projectMode) {
           }
           // A tool call printed as text (never run): answer again directly, in plain words.
           if (!stopped && isToolCallText(reply)) { delete handlers[job]; runDirect({ plain: true }).catch(e => { acc = "Error: " + e; show(); finish(); }); return; }
+          // It said it can't look things up without even trying its web tools: ask once more, telling it to search.
+          if (!stopped && !o.nudge && !/CLAW_TOOL /.test(raw) && saysNoWeb(reply)) { delete handlers[job]; runClaw({ nudge: true }).catch(e => { acc = "Error: " + e; show(); finish(); }); return; }
           out.classList.remove("thinking");
           acc = reply;
           if (!stopped && (p.code !== 0 || isErrorText(acc))) am.e = true;

@@ -1242,7 +1242,7 @@ class MainActivity : Activity() {
 
         /** Runs claw. Returns CLAW_OK, CLAW_NO_TOOLS (the model refused tools) or CLAW_TOOL_TEXT (it printed a tool call
          *  instead of answering), so the caller can chat directly. */
-        private fun clawChat(prior: List<Msg>, msg: String, atts: List<Att>, sb: StringBuilder, show: () -> Unit): Int {
+        private fun clawChat(prior: List<Msg>, msg: String, atts: List<Att>, sb: StringBuilder, show: () -> Unit, nudge: Boolean = false): Int {
             val work = workDir()
             val files = StringBuilder()
             atts.forEach { a ->
@@ -1255,7 +1255,7 @@ class MainActivity : Activity() {
             }
             val ctx = context(prior)
             val body = msg.ifEmpty { "Please look at the attached file(s)." } + files
-            val prompt = projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body")
+            val prompt = ChatGuards.toolHint(nudge) + projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body")
             val pb = ProcessBuilder("${applicationInfo.nativeLibraryDir}/libclaw.so", "--model", runModel,
                 "--dangerously-skip-permissions", "--output-format", "json", "prompt", prompt).directory(work).redirectErrorStream(true)
             val e = pb.environment(); env(e)
@@ -1266,11 +1266,12 @@ class MainActivity : Activity() {
             // never the raw search results / tool output the model reads.
             sb.setLength(0); sb.append(ToolSteps.LIVE).append("Thinking…"); show()
             val raw = StringBuilder()
+            var usedTool = false
             p.inputStream.bufferedReader().use { r ->
                 while (true) {
                     val line = r.readLine() ?: break
                     val st = ToolSteps.status(line)
-                    if (st != null) { if (!stopped) { sb.setLength(0); sb.append(ToolSteps.LIVE).append(st).append("…"); show() } }
+                    if (st != null) { usedTool = true; if (!stopped) { sb.setLength(0); sb.append(ToolSteps.LIVE).append(st).append("…"); show() } }
                     else raw.append(line).append('\n')
                 }
             }
@@ -1279,6 +1280,8 @@ class MainActivity : Activity() {
             sb.setLength(0)
             val reply = if (stopped) "" else ToolSteps.reply(raw.toString().replace(ansi, ""))
             if (!stopped && ChatGuards.isToolCallText(reply)) return CLAW_TOOL_TEXT
+            // It said it can't look things up without even trying its web tools: ask once more, telling it to search. Same as desktop.
+            if (!stopped && !nudge && !usedTool && ChatGuards.saysNoWeb(reply)) return clawChat(prior, msg, atts, sb, show, nudge = true)
             if (!stopped) sb.append(reply.let { r -> if (r.contains("exceeds the available context size", true)) VisionCtx.friendly(r) ?: r else r })
             if (!stopped && code != 0) replyErr = true
             if (!stopped && code != 0 && sb.isBlank()) sb.append("claw stopped (code $code). Is a model downloaded?")

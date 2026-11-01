@@ -4,6 +4,15 @@ import org.json.JSONObject
 
 /** Keeps error replies out of what the model reads, and catches tool calls a model printed as text instead of answering. */
 object ChatGuards {
+    /** Small models often forget they can search: remind them (with today's date) on every tool chat. Same text as desktop. */
+    fun toolHint(nudge: Boolean): String {
+        val today = java.text.SimpleDateFormat("EEEE, MMMM d, yyyy", java.util.Locale.getDefault()).format(java.util.Date())
+        return "Today is $today. You can use tools: WebSearch and WebFetch for anything current or online (weather, news, prices, scores, hours, facts you're unsure of), bash for commands and files. Never say you lack internet or real-time access; search instead." +
+            (if (nudge) " Your last answer said you couldn't look this up. You can: call WebSearch now, then answer from the results." else "") + "\n\n"
+    }
+    private val noWeb = Regex("(real[- ]time|up[- ]to[- ]date|current) (weather|data|information|info|news|prices?)|(don'?t|do not|can'?t|cannot|unable to) (have )?(access|browse|search|check|look up|retrieve)[^.]{0,40}(internet|web|online|real[- ]time|external|current)|as an ai[^.]{0,40}(no|not|don'?t)[^.]{0,30}(internet|real[- ]time)", RegexOption.IGNORE_CASE)
+    /** The reply claims it can't reach the web or live data. */
+    fun saysNoWeb(t: String) = noWeb.containsMatchIn(t)
     const val PLAIN_WORDS = "Answer the user's last message in plain words. Do not output JSON, function calls or tool calls."
     fun toolCallNote(model: String) = "$model answered with a tool request instead of words, so there's nothing to show. " +
         "Try asking again, or pick another model for this kind of task in Settings › Models for tasks."
