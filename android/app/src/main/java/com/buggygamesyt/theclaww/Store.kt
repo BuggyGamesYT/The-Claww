@@ -6,7 +6,8 @@ import java.io.File
 import java.util.UUID
 
 /** One chat message. [atts] are absolute paths of attached files. */
-class Msg(val user: Boolean, var text: String, val atts: List<String> = emptyList(), var stopped: Boolean = false)
+/** [error]: the reply was an error (Ollama/claw/API), never sent back to the model as conversation. */
+class Msg(val user: Boolean, var text: String, val atts: List<String> = emptyList(), var stopped: Boolean = false, var error: Boolean = false)
 
 /** A conversation; [project] is null for regular (non-project) chats. */
 class Conv(val id: String, var title: String, val project: String?, var updated: Long) {
@@ -66,7 +67,7 @@ object Store {
                     val o = a.getJSONObject(i)
                     val at = o.optJSONArray("a")
                     c.msgs.add(Msg(o.getBoolean("u"), o.optString("t"),
-                        if (at == null) emptyList() else (0 until at.length()).map { at.getString(it) }, o.optBoolean("s")))
+                        if (at == null) emptyList() else (0 until at.length()).map { at.getString(it) }, o.optBoolean("s"), o.optBoolean("e")))
                 }
             } catch (_: Exception) {}
         }
@@ -81,7 +82,7 @@ object Store {
         if (convs.none { it.id == c.id }) convs.add(0, c)
         val a = JSONArray()
         c.msgs.forEach { m ->
-            a.put(JSONObject().put("u", m.user).put("t", m.text).put("a", JSONArray(m.atts)).put("s", m.stopped))
+            a.put(JSONObject().put("u", m.user).put("t", m.text).put("a", JSONArray(m.atts)).put("s", m.stopped).put("e", m.error))
         }
         File(dir, "c_${c.id}.json").writeText(a.toString())
         saveIndex()

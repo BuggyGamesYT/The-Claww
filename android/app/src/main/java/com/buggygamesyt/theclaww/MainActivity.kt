@@ -657,6 +657,8 @@ class MainActivity : Activity() {
 
     /** [mode] null = regular Chat tab; non-null = project chat (project comes from the open conversation). */
     inner class ChatPane(private val mode: String?) {
+        /** Set when the current reply is an error, so it's kept out of the history sent to the model later. */
+        @Volatile private var replyErr = false
         val root = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
         lateinit var conv: Conv
         private val title = text("", 17f, fg, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
@@ -1175,18 +1177,21 @@ class MainActivity : Activity() {
                 try {
                     // Photos/videos, a model that can't use tools, or Tools switched off for this task: chat with Ollama
                     // directly. Everything else goes through claw (web search, files, commands).
+                    replyErr = false
                     val noTools = ModelCaps.tools(prefs, host, runModel) == false || !prefs.getBoolean("taskTools_$task", true)
                     if (visual.isNotEmpty() || noTools) directChat(prior, msg, atts, visual, sb, ::show)
-                    else if (clawChat(prior, msg, atts, sb, ::show) && !stopped) {
+                    else when (clawChat(prior, msg, atts, sb, ::show)) {
                         // Safety net: the model turned out not to support tools. Remember that and answer directly instead.
-                        ModelCaps.markNoTools(prefs, runModel)
-                        directChat(prior, msg, atts, visual, sb, ::show)
+                        CLAW_NO_TOOLS -> if (!stopped) { ModelCaps.markNoTools(prefs, runModel); directChat(prior, msg, atts, visual, sb, ::show) }
+                        // It printed a tool call as text (nothing ran): answer again directly, in plain words.
+                        CLAW_TOOL_TEXT -> if (!stopped) directChat(prior, msg, atts, visual, sb, ::show, plain = true)
                     }
                 } catch (ex: Exception) {
-                    if (!stopped) { sb.setLength(0); sb.append("Error: ${ex.message}"); show() }
+                    if (!stopped) { sb.setLength(0); sb.append("Error: ${ex.message}"); replyErr = true; show() }
                 } finally {
                     proc = null; cancel = null
                     am.text = sb.toString().trim(); am.stopped = stopped
+                    am.error = !stopped && (replyErr || ChatGuards.isErrorText(am.text))
                     Store.saveConv(conv)
                     val partial = am.text
                     runOnUiThread {
@@ -1220,7 +1225,7 @@ class MainActivity : Activity() {
 
         private fun context(prior: List<Msg>): String {
             val h = StringBuilder()
-            prior.forEach { m ->
+            ChatGuards.clean(prior).forEach { m ->
                 h.append(if (m.user) "User: " else "Assistant: ").append(m.text)
                 if (m.atts.isNotEmpty()) h.append(" [attached: ${m.atts.joinToString { File(it).name }}]")
                 if (m.stopped) h.append(" [reply cut off by user]")
@@ -1235,8 +1240,9 @@ class MainActivity : Activity() {
                 (if (p.notes.isNotBlank()) "\nProject notes:\n${p.notes}" else "") + "\n\n"
         }
 
-        /** Runs claw; returns true when the model refused tools ("does not support tools"), so the caller can chat directly. */
-        private fun clawChat(prior: List<Msg>, msg: String, atts: List<Att>, sb: StringBuilder, show: () -> Unit): Boolean {
+        /** Runs claw. Returns CLAW_OK, CLAW_NO_TOOLS (the model refused tools) or CLAW_TOOL_TEXT (it printed a tool call
+         *  instead of answering), so the caller can chat directly. */
+        private fun clawChat(prior: List<Msg>, msg: String, atts: List<Att>, sb: StringBuilder, show: () -> Unit): Int {
             val work = workDir()
             val files = StringBuilder()
             atts.forEach { a ->
@@ -1269,27 +1275,32 @@ class MainActivity : Activity() {
                 }
             }
             val code = p.waitFor()
-            if (!stopped && raw.contains("does not support tools", true)) { sb.setLength(0); return true }
+            if (!stopped && raw.contains("does not support tools", true)) { sb.setLength(0); return CLAW_NO_TOOLS }
             sb.setLength(0)
-            if (!stopped) sb.append(ToolSteps.reply(raw.toString().replace(ansi, "")).let { r ->
-                if (r.contains("exceeds the available context size", true)) VisionCtx.friendly(r) ?: r else r })
+            val reply = if (stopped) "" else ToolSteps.reply(raw.toString().replace(ansi, ""))
+            if (!stopped && ChatGuards.isToolCallText(reply)) return CLAW_TOOL_TEXT
+            if (!stopped) sb.append(reply.let { r -> if (r.contains("exceeds the available context size", true)) VisionCtx.friendly(r) ?: r else r })
+            if (!stopped && code != 0) replyErr = true
             if (!stopped && code != 0 && sb.isBlank()) sb.append("claw stopped (code $code). Is a model downloaded?")
             show()
-            return false
+            return CLAW_OK
         }
 
         /** Direct chat with Ollama's /api/chat, streamed into the bubble: photos/videos (so a vision model can see them),
          *  models that can't use tools, and tasks with Tools switched off. */
-        private fun directChat(prior: List<Msg>, msg: String, atts: List<Att>, visual: List<Att>, sb: StringBuilder, show: () -> Unit) {
+        private fun directChat(prior: List<Msg>, msg: String, atts: List<Att>, visual: List<Att>, sb: StringBuilder, show: () -> Unit, plain: Boolean = false) {
             sb.setLength(0); sb.append(ToolSteps.LIVE).append("Thinking…"); show()
+            replyErr = false
             var got = false
             val images = JSONArray()
             var notes = ""
             // Fit every picture and frame in the model's memory (the error was "request exceeds the available context size").
-            val ctxSet = prefs.getInt("ctxLen", 0)
-            val numCtx = if (visual.isNotEmpty()) VisionCtx.ctx(ctxSet, ramBytes() / 1e9) else if (ctxSet > 0) ctxSet else 4096
+            // Memory budget: the biggest context that fits next to this model (4K when it's too big for the budget).
+            val bud = budgetCtx(runModel)
+            val ctxSet = if (bud > 0) bud else prefs.getInt("ctxLen", 0)
+            val numCtx = if (bud > 0) bud else if (visual.isNotEmpty()) VisionCtx.ctx(ctxSet, ramBytes() / 1e9) else if (ctxSet > 0) ctxSet else 4096
             val histMsgs = ArrayList<Msg>(); var histChars = 0
-            for (m in prior.takeLast(20).asReversed()) { if (m.text.isBlank()) continue; if (histChars + m.text.length > numCtx * 0.25 * 3.5) break; histChars += m.text.length; histMsgs.add(0, m) }
+            for (m in ChatGuards.clean(prior).takeLast(20).asReversed()) { if (m.text.isBlank()) continue; if (histChars + m.text.length > numCtx * 0.25 * 3.5) break; histChars += m.text.length; histMsgs.add(0, m) }
             val plan = VisionCtx.plan(numCtx, visual.count { it.mime.startsWith("image/") }, visual.count { !it.mime.startsWith("image/") }, histChars + msg.length)
             visual.forEach { a ->
                 if (a.mime.startsWith("image/")) loadScaled(a.path, plan.imgMax)?.let { images.put(b64(it)) }
@@ -1305,7 +1316,7 @@ class MainActivity : Activity() {
                          else "\n(Also attached: ${a.name}, ${a.mime})"
             }
             val messages = JSONArray()
-            messages.put(JSONObject().put("role", "system").put("content", (DIRECT_PERSONA + "\n\n" + projectPreamble()).trim()))
+            messages.put(JSONObject().put("role", "system").put("content", (DIRECT_PERSONA + "\n\n" + projectPreamble() + (if (plain) "\n\n" + ChatGuards.PLAIN_WORDS else "")).trim()))
             histMsgs.forEach { m -> messages.put(JSONObject().put("role", if (m.user) "user" else "assistant").put("content", m.text)) }
             val um = JSONObject().put("role", "user").put("content", msg.ifEmpty { if (visual.isNotEmpty()) "What's in this?" else "Please look at the attached file(s)." } + notes)
             if (images.length() > 0) um.put("images", images)
@@ -1316,6 +1327,7 @@ class MainActivity : Activity() {
             c.connectTimeout = 5000; c.readTimeout = 600000
             val req = JSONObject().put("model", runModel).put("stream", true).put("messages", messages)
             if (visual.isNotEmpty() || ctxSet > 0) req.put("options", JSONObject().put("num_ctx", numCtx))
+            if (budgetGb() > 0) req.put("keep_alive", "30m")
             c.outputStream.use { it.write(req.toString().toByteArray()) }
             val stream = if (c.responseCode >= 400) c.errorStream else c.inputStream
             stream.bufferedReader().forEachLine { line ->
@@ -1323,6 +1335,7 @@ class MainActivity : Activity() {
                 val j = try { JSONObject(line) } catch (_: Exception) { return@forEachLine }
                 if (!got) { got = true; sb.setLength(0) }
                 if (j.has("error")) {
+                    replyErr = true
                     val err = j.getString("error")
                     sb.append(VisionCtx.friendly(err) ?: if (err.contains("image", true) || err.contains("vision", true) || err.contains("multimodal", true))
                         "$runModel can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:3b or llava-phi3, then try again.\n($err)"
@@ -1331,8 +1344,30 @@ class MainActivity : Activity() {
                 show()
             }
             if (!got) { sb.setLength(0); show() }
+            // The model wrote a tool call as text instead of answering: ask once more for plain words, then give up kindly.
+            if (!stopped && ChatGuards.isToolCallText(sb.toString())) {
+                if (!plain) { directChat(prior, msg, atts, visual, sb, show, plain = true); return }
+                sb.setLength(0); sb.append(ChatGuards.toolCallNote(runModel)); replyErr = true; show()
+            }
         }
     }
+
+    private val CLAW_OK = 0
+    private val CLAW_NO_TOOLS = 1
+    private val CLAW_TOOL_TEXT = 2
+
+    // ===================== Memory budget =====================
+    /** "Use up to N GB" (0 = off). */
+    private fun budgetGb() = prefs.getInt("budgetGB", 0)
+    /** Bytes per KV-cache element: the built-in Ollama uses a q8_0 cache (1 byte); another Ollama is assumed f16 (2). */
+    private fun kvBytes() = if (builtIn) 1 else 2
+    /** Context for [m] under the budget (blocking: may ask Ollama about the model), or 0 when the budget is off. */
+    private fun budgetCtx(m: String): Int {
+        val gb = budgetGb(); if (gb <= 0) return 0
+        ModelCaps.tools(prefs, host, m)
+        return Budget.plan(prefs, m, gb, kvBytes())?.ctx ?: prefs.getInt("budgetCtx", 0)
+    }
+    private fun tooBig(m: String) = budgetGb() > 0 && Budget.plan(prefs, m, budgetGb(), kvBytes())?.tooBig == true
 
     /** How claw talks when it chats with a model directly (no tools): same voice as the app's claw. */
     private val DIRECT_PERSONA = "You are claw, a helpful AI assistant running locally on the user's own device through Ollama. Answer clearly and concisely. " +
@@ -1581,7 +1616,7 @@ class MainActivity : Activity() {
                 pb.environment()["OLLAMA_NUM_PARALLEL"] = "1"
                 pb.environment()["OLLAMA_MAX_LOADED_MODELS"] = "1"
                 // Memory setting: a longer context lets the model remember more (uses more RAM).
-                val ctxLen = prefs.getInt("ctxLen", 0)
+                val ctxLen = if (budgetGb() > 0 && prefs.getInt("budgetCtx", 0) > 0) prefs.getInt("budgetCtx", 0) else prefs.getInt("ctxLen", 0)
                 if (ctxLen > 0) pb.environment()["OLLAMA_CONTEXT_LENGTH"] = ctxLen.toString()
                 ollama = pb.start()
             } catch (e: Exception) {
@@ -1658,6 +1693,10 @@ class MainActivity : Activity() {
                 modelList.addView(LinearLayout(this).apply {
                     gravity = Gravity.CENTER_VERTICAL; background = round(if (on) withAlpha(accent, 70) else surface2, 12); setPadding(dp(14), dp(10), dp(12), dp(10))
                     addView(TextView(this@MainActivity).apply { text = name; setTextColor(fg); textSize = 14f; maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                    if (tooBig(name)) addView(TextView(this@MainActivity).apply {
+                        text = "too big for budget"; setTextColor(Color.rgb(240, 180, 60)); textSize = 10.5f; setTypeface(typeface, Typeface.BOLD); setPadding(dp(6), dp(1), dp(6), dp(1))
+                        background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setStroke(dp(1), Color.argb(150, 240, 180, 60)) }
+                    }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
                     if (ModelCaps.noTools(prefs, name)) addView(TextView(this@MainActivity).apply {
                         text = "no tools"; setTextColor(muted); textSize = 10.5f; setTypeface(typeface, Typeface.BOLD); setPadding(dp(6), dp(1), dp(6), dp(1))
                         background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setStroke(dp(1), withAlpha(muted, 140)) }
@@ -1715,14 +1754,14 @@ class MainActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL; background = round(surface2, 12); setPadding(dp(14), dp(10), dp(12), dp(10))
                     addView(TextView(this@MainActivity).apply { text = l; setTextColor(fg); textSize = 14f }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                     addView(TextView(this@MainActivity).apply {
-                        text = cur.ifEmpty { "Auto" } + (if (cur.isNotEmpty() && ModelCaps.noTools(prefs, cur)) " · no tools" else "")
+                        text = cur.ifEmpty { "Auto" } + (if (cur.isNotEmpty() && ModelCaps.noTools(prefs, cur)) " · no tools" else "") + (if (cur.isNotEmpty() && tooBig(cur)) " · too big for budget" else "")
                         setTextColor(if (cur.isEmpty()) muted else accent); textSize = 13f; maxLines = 1
                         ellipsize = android.text.TextUtils.TruncateAt.MIDDLE; gravity = Gravity.END
                     }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.2f))
                     addView(toolsSw, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(10) })
                     setOnClickListener {
                         val names = listOf("Auto") + (allModels ?: emptyList())
-                        val shown = names.mapIndexed { i, n -> if (i > 0 && ModelCaps.noTools(prefs, n)) "$n  · no tools" else n }
+                        val shown = names.mapIndexed { i, n -> if (i == 0) n else n + (if (ModelCaps.noTools(prefs, n)) "  · no tools" else "") + (if (tooBig(n)) "  · too big for budget" else "") }
                         AlertDialog.Builder(this@MainActivity, dialogStyle).setTitle("Model for ${l.lowercase()}")
                             .setItems(shown.toTypedArray()) { _, i ->
                                 val pick = if (i == 0) "" else names[i]
@@ -1751,10 +1790,11 @@ class MainActivity : Activity() {
             memOpts.forEach { (v, l) ->
                 memRow.addView(TextView(this).apply {
                     text = l; textSize = 13f; gravity = Gravity.CENTER
-                    setTextColor(if (v == cur) t.onAccent else fg); background = round(if (v == cur) accent else surface2, 12)
-                    setPadding(dp(4), dp(8), dp(4), dp(8))
+                    val sel = v == cur && budgetGb() <= 0
+                    setTextColor(if (sel) t.onAccent else fg); background = round(if (sel) accent else surface2, 12)
+                    setPadding(dp(4), dp(8), dp(4), dp(8)); alpha = if (budgetGb() > 0) 0.5f else 1f
                     setOnClickListener {
-                        if (v == prefs.getInt("ctxLen", 0)) return@setOnClickListener
+                        if (budgetGb() > 0 || v == prefs.getInt("ctxLen", 0)) return@setOnClickListener
                         prefs.edit().putInt("ctxLen", v).apply(); paintMem()
                         if (builtIn) thread {
                             ollama?.let { o -> o.destroy(); try { o.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {} }
@@ -1765,10 +1805,72 @@ class MainActivity : Activity() {
             }
             memNote.text = (if (cur == 0) "Auto lets Ollama pick." else "${memOpts.first { it.first == cur }.second} tokens of memory.") +
                 " Bigger uses more RAM and can be slower; 32K suits web searches on ${"%.0f".format(ramGb)} GB." +
-                (if (builtIn) "" else " Applies to the Ollama on this device only; on a PC, use the Memory setting in The Claww desktop app.")
+                (if (builtIn) "" else " Applies to the Ollama on this device only; on a PC, use the Memory setting in The Claww desktop app.") +
+                (if (budgetGb() > 0) " Memory budget is on, so the context comes from the budget below." else "")
         }
         paintMem()
         box.addView(memRow); box.addView(memNote)
+        // Memory budget: "Use up to N GB". A model only uses its weights plus its context, so the budget becomes the biggest
+        // context that fits next to the weights of the model in use. Phones share memory between the CPU and graphics.
+        box.addView(label("Memory budget · let models use up to a set amount of memory"))
+        val ramB = ramBytes()
+        val maxGb = maxOf(2, (ramB / 1_000_000_000L - 3).toInt())
+        val budOn = Switch(this).apply { text = "Use up to"; setTextColor(fg); textSize = 14f; isChecked = budgetGb() > 0 }
+        val budVal = TextView(this).apply { setTextColor(fg); textSize = 16f; setTypeface(typeface, Typeface.BOLD); gravity = Gravity.END }
+        val budBar = android.widget.SeekBar(this).apply { max = maxGb - 2; progress = ((if (budgetGb() > 0) budgetGb() else prefs.getInt("budgetLast", minOf(maxGb, (ramB * 0.6 / 1e9).toInt().coerceAtLeast(2)))) - 2).coerceIn(0, maxGb - 2) }
+        val budHw = TextView(this).apply { setTextColor(muted); textSize = 12f; text = "This device: ${"%.0f".format(ramB / 1e9)} GB memory, shared with graphics. Up to $maxGb GB leaves room for the system." }
+        val budRes = TextView(this).apply { setTextColor(muted); textSize = 12f; setPadding(0, dp(4), 0, dp(10)) }
+        fun budGb() = budBar.progress + 2
+        fun paintBudget() {
+            budVal.text = "${budGb()} GB"; budBar.isEnabled = budOn.isChecked; budVal.alpha = if (budOn.isChecked) 1f else 0.5f
+            if (!budOn.isChecked) { budRes.text = "Off: Ollama sizes memory itself (the Memory setting above)."; return }
+            val m = model; val gb = budGb()
+            budRes.text = "Working out what fits for $m…"
+            thread {
+                ModelCaps.tools(prefs, host, m)
+                val p = Budget.plan(prefs, m, gb, kvBytes())
+                runOnUiThread {
+                    if (budGb() != gb || !budOn.isChecked) return@runOnUiThread
+                    budRes.text = when {
+                        p == null -> "Can't size $m yet (is Ollama running?)."
+                        p.tooBig -> "$m is too big for $gb GB: it still runs, with a 4K context (~${"%.0f".format(p.bytes / 1e9)} GB), and Ollama loads what it can."
+                        else -> "$m: ≈ ${p.ctx / 1024}K context, ~${"%.0f".format(p.bytes / 1e9)} GB."
+                    }
+                }
+            }
+        }
+        fun applyBudget() {
+            val gb = if (budOn.isChecked) budGb() else 0
+            val ed = prefs.edit().putInt("budgetGB", gb)
+            if (gb > 0) ed.putInt("budgetLast", gb)
+            ed.apply()
+            paintMem(); paintBudget(); renderModels(); renderTasks()
+            thread {
+                if (gb > 0) {
+                    ModelCaps.tools(prefs, host, model)
+                    prefs.edit().putInt("budgetCtx", Budget.plan(prefs, model, gb, kvBytes())?.ctx ?: 0).apply()
+                }
+                // The built-in Ollama takes the new context length (and keeps models loaded 30 min, as it already does).
+                if (builtIn) {
+                    ollama?.let { o -> o.destroy(); try { o.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {} }
+                    ollama = null; startOllama()
+                }
+            }
+        }
+        budOn.setOnCheckedChangeListener { _, _ -> applyBudget() }
+        budBar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar, v: Int, user: Boolean) { if (user) { budVal.text = "${budGb()} GB" } }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar) {}
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar) { applyBudget() }
+        })
+        box.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(budOn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            addView(budBar, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            addView(budVal, LinearLayout.LayoutParams(dp(56), WRAP_CONTENT))
+        })
+        box.addView(budHw); box.addView(budRes)
+        paintBudget()
         box.addView(pull, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)))
         box.addView(Button(this).apply {
             text = "Browse & download any model"; setTextColor(fg); background = round(surface2, 12); isAllCaps = false
