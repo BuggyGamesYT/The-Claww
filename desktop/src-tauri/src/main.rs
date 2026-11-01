@@ -400,7 +400,7 @@ fn open_path(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     if !p.is_file() { return Err("that file isn't there anymore".into()); }
     #[cfg(windows)]
-    let r = no_window(Command::new("explorer")).arg(&p).spawn();
+    let r = no_window(Command::new("explorer").arg(&p)).spawn();
     #[cfg(target_os = "macos")]
     let r = Command::new("open").arg(&p).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
