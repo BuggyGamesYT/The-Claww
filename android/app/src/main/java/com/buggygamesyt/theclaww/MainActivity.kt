@@ -231,7 +231,7 @@ class MainActivity : Activity() {
     private val glassOn get() = prefs.getBoolean("glass", false)
     private val glassTints get() = listOf(
         "Clear" to Color.WHITE, "Theme" to t.accent, "Blue" to Color.rgb(90, 160, 255), "Mint" to Color.rgb(80, 220, 180),
-        "Pink" to Color.rgb(255, 120, 190), "Violet" to Color.rgb(170, 120, 255), "Amber" to Color.rgb(255, 190, 80), "Smoke" to Color.rgb(20, 20, 24))
+        "Pink" to Color.rgb(255, 120, 190), "Violet" to Color.rgb(170, 120, 255), "Amber" to Color.rgb(255, 190, 80), "Smoke" to Color.rgb(20, 20, 24), "Custom" to prefs.getInt("glassCustom", Color.rgb(120, 200, 255)))
     private fun glassTint() = glassTints.firstOrNull { it.first == prefs.getString("glassTint", "Clear") }?.second ?: Color.WHITE
     private fun withAlpha(c: Int, a: Int) = (c and 0x00FFFFFF) or (a.coerceIn(0, 255) shl 24)
 
@@ -1235,7 +1235,11 @@ class MainActivity : Activity() {
         box.addView(label("Glass tint"))
         box.addView(swatchRow(glassTints.map { (name, c) ->
             name to GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(withAlpha(c, 230), withAlpha(c, 90)))
-        }, prefs.getString("glassTint", "Clear")!!) { name -> prefs.edit().putString("glassTint", name).putBoolean("glass", true).apply(); dialog?.dismiss(); recreate() })
+        }, prefs.getString("glassTint", "Clear")!!) { name ->
+            dialog?.dismiss()
+            if (name == "Custom") pickGlassColor()
+            else { prefs.edit().putString("glassTint", name).putBoolean("glass", true).apply(); recreate() }
+        })
         slider("Glass tint strength", "glassStrength", 30, 100)
         if (Build.VERSION.SDK_INT >= 31) slider("Wallpaper blur (frosted glass)", "blur", 0, 25)
         box.addView(label("Wallpaper dimming"))
@@ -1249,6 +1253,32 @@ class MainActivity : Activity() {
         })
         dialog = AlertDialog.Builder(this, dialogStyle).setTitle("Look").setView(ScrollView(this).apply { addView(box) })
             .setPositiveButton("Done", null).show()
+    }
+
+    /** Any-color glass tint: hue, saturation and brightness sliders with a live glass preview. */
+    private fun pickGlassColor() {
+        val hsv = FloatArray(3); Color.colorToHSV(prefs.getInt("glassCustom", Color.rgb(120, 200, 255)), hsv)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(8)) }
+        val preview = View(this)
+        val previewWrap = FrameLayout(this).apply { background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(t.accent, t.bg)).apply { cornerRadius = dp(18).toFloat() }; setPadding(dp(18), dp(18), dp(18), dp(18)); addView(preview, FrameLayout.LayoutParams(MATCH_PARENT, dp(56))) }
+        fun color() = Color.HSVToColor(hsv)
+        fun update() { preview.background = glass(18, color()) }
+        box.addView(previewWrap)
+        listOf(Triple("Hue", 0, 360), Triple("Saturation", 1, 100), Triple("Brightness", 2, 100)).forEach { (name, i, max) ->
+            box.addView(TextView(this).apply { text = name; setTextColor(muted); textSize = 12f; setPadding(0, dp(14), 0, dp(4)) })
+            box.addView(android.widget.SeekBar(this).apply {
+                this.max = max; progress = if (i == 0) hsv[0].toInt() else (hsv[i] * 100).toInt()
+                setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: android.widget.SeekBar, v: Int, user: Boolean) { hsv[i] = if (i == 0) v.toFloat() else v / 100f; update() }
+                    override fun onStartTrackingTouch(sb: android.widget.SeekBar) {}
+                    override fun onStopTrackingTouch(sb: android.widget.SeekBar) {}
+                })
+            })
+        }
+        update()
+        AlertDialog.Builder(this, dialogStyle).setTitle("Glass color").setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Use") { _, _ -> prefs.edit().putInt("glassCustom", color()).putString("glassTint", "Custom").putBoolean("glass", true).apply(); recreate() }
+            .setNegativeButton("Cancel", null).show()
     }
 
     @Deprecated("Deprecated in Java")
