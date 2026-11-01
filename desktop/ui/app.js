@@ -1178,6 +1178,14 @@ function ChatPane(root, projectMode) {
           }
         }
       }
+      // Nothing the model could see came through (every video unreadable, no photos) and nothing else was asked:
+      // say so plainly instead of letting the model guess about pictures it never got.
+      if (visual.length && !images.length && !text.trim() && atts.every(x => visual.includes(x))) {
+        out.classList.remove("thinking");
+        acc = "I couldn't read that video, so there was nothing to show the model. Open it in your video player to check it plays, or install ffmpeg so The Claww can read any format.";
+        am.e = true; show(); finish(); return;
+      }
+      if (visual.length && !images.length) notes += "\n(No images reached you this time. Don't claim you can't see images in general; just say this file couldn't be read.)";
       for (const a of atts.filter(x => !visual.includes(x)))
         notes += isText(a.name, a.mime) ? `\n\nAttached file ${a.name}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 20000 })}\n\`\`\`` : `\n(Also attached: ${a.name}, ${a.mime})`;
       const messages = [{ role: "system", content: (DIRECT_PERSONA + "\n\n" + preamble() + (o.plain ? "\n\n" + PLAIN_WORDS : "")).trim() }];

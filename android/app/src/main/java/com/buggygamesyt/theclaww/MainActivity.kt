@@ -1307,9 +1307,15 @@ class MainActivity : Activity() {
                 else {
                     val frames = videoFrames(a.path, plan.frames, plan.vidMax)
                     frames.forEach { images.put(b64(it)) }
-                    notes += "\n(The video \"${a.name}\" is shown as ${frames.size} frames in time order.)"
+                    notes += if (frames.isNotEmpty()) "\n(The video \"${a.name}\" is shown as ${frames.size} frames in time order.)"
+                             else "\n(The user attached a video \"${a.name}\" but it couldn't be read, so you can't see it. Say so briefly.)"
                 }
             }
+            // Nothing the model could see came through and nothing else was asked: say so plainly (same as desktop).
+            if (visual.isNotEmpty() && images.length() == 0 && msg.isBlank() && atts.all { it in visual }) {
+                sb.setLength(0); sb.append("I couldn't read that video, so there was nothing to show the model. Check that it plays in your Gallery or Files app, or convert it to MP4 (H.264) and try again."); replyErr = true; show(); return
+            }
+            if (visual.isNotEmpty() && images.length() == 0) notes += "\n(No images reached you this time. Don't claim you can't see images in general; just say this file couldn't be read.)"
             atts.filter { it !in visual }.forEach { a ->
                 val f = File(a.path)
                 notes += if (isTextName(a.name) || a.mime.startsWith("text/")) "\n\nAttached file ${a.name}:\n```\n${try { f.readText().take(20000) } catch (_: Exception) { "" }}\n```"
