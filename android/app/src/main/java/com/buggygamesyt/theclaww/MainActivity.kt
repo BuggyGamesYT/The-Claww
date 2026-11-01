@@ -1301,7 +1301,7 @@ class MainActivity : Activity() {
     /** Browse every free model (Ollama library + all GGUF models on Hugging Face), newest first, with search, picks and a multi-select download queue. */
     private fun openModels() {
         val dlg = android.app.Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
-        var source = prefs.getString("modelSource", "all")!!; var newest = prefs.getBoolean("modelNewest", true)
+        var source = prefs.getString("modelSource", "all")!!; var newest = prefs.getBoolean("modelNewest", true); var popular = prefs.getBoolean("modelPopular", false)
         var query = ""; var page = 0; var gen = 0
         val selected = LinkedHashMap<String, Long>()
         var installed = setOf<String>()
@@ -1453,18 +1453,30 @@ class MainActivity : Activity() {
             val g = ++gen
             if (reset) { page = 0; results.removeAllViews(); renderPicks() } else page++
             more.visibility = View.GONE; statusV.text = "Loading…"; statusV.visibility = View.VISIBLE
-            val q = query; val src = source; val nw = newest; val p = page
+            val q = query; val src = source; val p = page
+            // Checkboxes: Newest and/or Most popular. Both on = two sections.
+            val modes = listOfNotNull(if (newest) true else null, if (popular) false else null).ifEmpty { listOf(true) }
             thread {
-                val got = mutableListOf<CatalogEntry>(); var hasMore = false; var err: String? = null
-                if (src != "hf") try { val (l, m) = Catalog.ollama(q, p, nw); got += l; hasMore = hasMore || m } catch (e: Exception) { err = e.message }
-                if (src != "ollama") try { val (l, m) = Catalog.hf(q, p, nw); got += l; hasMore = hasMore || m } catch (e: Exception) { err = e.message }
-                val sorted = if (nw) got.sortedByDescending { it.date } else got.sortedByDescending { it.downloads }
+                var hasMore = false; var err: String? = null
+                val seenIds = HashSet<String>()
+                val sections = modes.map { nw ->
+                    var a = listOf<CatalogEntry>(); var b = listOf<CatalogEntry>()
+                    if (src != "hf") try { val (l, m) = Catalog.ollama(q, p, nw); a = l; hasMore = hasMore || m } catch (e: Exception) { err = e.message }
+                    if (src != "ollama") try { val (l, m) = Catalog.hf(q, p, nw); b = l; hasMore = hasMore || m } catch (e: Exception) { err = e.message }
+                    // Newest: one timeline by release date. Best: each catalog's own ranking (Ollama pulls, HF likes), interleaved.
+                    val merged = if (nw) (a + b).sortedByDescending { it.date } else (0 until maxOf(a.size, b.size)).flatMap { listOfNotNull(a.getOrNull(it), b.getOrNull(it)) }
+                    nw to merged.filter { seenIds.add(it.source + ":" + it.id) }
+                }
                 runOnUiThread {
                     if (g != gen) return@runOnUiThread
-                    if (reset && sorted.isNotEmpty()) results.addView(section(if (q.isEmpty()) (if (nw) "Newest models" else "Most popular") else "Results for \"$q\""))
-                    sorted.forEach { results.addView(entryCard(it)) }
-                    statusV.visibility = if (sorted.isEmpty() && results.childCount == 0) View.VISIBLE else View.GONE
-                    statusV.text = if (err != null && sorted.isEmpty()) "Couldn't reach the model catalogs: $err" else "Nothing found. Try another word."
+                    sections.forEach { (nw, list) ->
+                        if (list.isEmpty()) return@forEach
+                        if (reset || modes.size > 1) results.addView(section((if (nw) "Newest" else "Best") + if (q.isEmpty()) " models" else " · \"$q\""))
+                        list.forEach { results.addView(entryCard(it)) }
+                    }
+                    val empty = sections.all { it.second.isEmpty() } && results.childCount == 0
+                    statusV.visibility = if (empty) View.VISIBLE else View.GONE
+                    statusV.text = if (err != null) "Couldn't reach the model catalogs: $err" else "Nothing found. Try another word."
                     more.visibility = if (hasMore) View.VISIBLE else View.GONE
                 }
             }
@@ -1477,8 +1489,12 @@ class MainActivity : Activity() {
                 if (on) { background = round(accent, 16); setTextColor(t.onAccent) }
                 layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) }
             })
-            f("Newest", newest) { newest = true; prefs.edit().putBoolean("modelNewest", true).apply(); renderFilters(); load(true) }
-            f("Popular", !newest) { newest = false; prefs.edit().putBoolean("modelNewest", false).apply(); renderFilters(); load(true) }
+            fun box(label: String, on: Boolean, set: (Boolean) -> Unit) = filters.addView(android.widget.CheckBox(this).apply {
+                text = label; setTextColor(fg); isChecked = on; buttonTintList = android.content.res.ColorStateList.valueOf(accent)
+                setOnCheckedChangeListener { b, c -> if (!c && !(if (label.startsWith("Newest")) popular else newest)) { b.isChecked = true; return@setOnCheckedChangeListener }; set(c); load(true) }
+            }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(6) })
+            box("Newest at top", newest) { newest = it; prefs.edit().putBoolean("modelNewest", it).apply() }
+            box("Best models", popular) { popular = it; prefs.edit().putBoolean("modelPopular", it).apply() }
             filters.addView(View(this), LinearLayout.LayoutParams(dp(10), 1))
             listOf("all" to "All sources", "ollama" to "Ollama", "hf" to "Hugging Face").forEach { (k, l) ->
                 f(l, source == k) { source = k; prefs.edit().putString("modelSource", k).apply(); renderFilters(); load(true) }

@@ -85,6 +85,22 @@ const ANIMATED = () => {
 const TINTS = { Clear: "#ffffff", Theme: null, Blue: "#5aa0ff", Mint: "#50dcb4", Pink: "#ff78be", Violet: "#aa78ff", Amber: "#ffbe50", Smoke: "#141418" };
 
 let wallAnim = null;
+// Displacement map for the refraction filter: edges of a rounded rect push pixels inward (R = x, G = y).
+let lensDone = false;
+function ensureLensMap() {
+  if (lensDone) return; lensDone = true;
+  const N = 256, c = h("canvas"); c.width = c.height = N; const ctx = c.getContext("2d"); const img = ctx.createImageData(N, N);
+  const r = 0.22, band = 0.2;
+  const sd = (x, y) => { const qx = Math.abs(x) - 0.5 + r, qy = Math.abs(y) - 0.5 + r; return Math.min(Math.max(qx, qy), 0) + Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) - r; };
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const x = (i + 0.5) / N - 0.5, y = (j + 0.5) / N - 0.5, d = sd(x, y), e = 1 / N;
+    let nx = sd(x + e, y) - sd(x - e, y), ny = sd(x, y + e) - sd(x, y - e); const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
+    const t = Math.min(Math.max(-d / band, 0), 1), k = Math.pow(1 - t, 2.2);
+    const o = (j * N + i) * 4; img.data[o] = 128 + nx * k * 127; img.data[o + 1] = 128 + ny * k * 127; img.data[o + 2] = 128; img.data[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  const fe = document.getElementById("lens-map"); fe.setAttribute("href", c.toDataURL()); fe.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", c.toDataURL());
+}
 function applyLook() {
   const c = themeColors(), r = document.documentElement.style;
   ["--bg", "--surface", "--surface2", "--fg", "--muted", "--accent", "--on-accent"].forEach((v, i) => r.setProperty(v, c[i]));
@@ -95,7 +111,11 @@ function applyLook() {
   r.setProperty("--bubble-op", (P.get("bubbleOpacity", 100) / 100).toFixed(2));
   r.setProperty("--wall-blur", P.get("blur", 0) + "px");
   r.setProperty("--dim", (P.get("dim", 45) / 100).toFixed(2));
-  document.body.classList.toggle("glass", P.get("glass", false));
+  const liquid = P.get("glass", false) && P.get("glassStyle", "Liquid") === "Liquid";
+  document.body.classList.toggle("glass", P.get("glass", false) && !liquid);
+  document.body.classList.toggle("liquid", liquid);
+  document.body.classList.toggle("svgbf", liquid && /Chrome|Edg\//.test(navigator.userAgent));
+  if (liquid) ensureLensMap();
   document.body.classList.toggle("light-bubbles", P.get("bubbleOpacity", 100) < 60);
   // wallpaper
   const wall = $("#wall"), w = P.get("wall", "None");
@@ -257,6 +277,9 @@ let liveUpdaters = [];
 const widgets = () => P.get("widgets", [{ type: "status" }, { type: "device" }, { type: "recent" }]);
 function renderHome() {
   const home = $("#home"); home.innerHTML = ""; liveUpdaters = [];
+  const fresh = P.get("newModelNames", []);
+  if (fresh.length) home.append(h("div", { class: "card panel click", onclick: openModels }, h("div", { class: "hdr" }, "New AI models"),
+    h("div", { class: "big" }, `${fresh.length} new model${fresh.length === 1 ? "" : "s"} released`), h("div", { class: "muted", style: "margin-top:4px" }, fresh.join(", "))));
   const list = widgets();
   list.forEach((w, i) => {
     const c = buildWidget(w, i);
@@ -458,12 +481,61 @@ function ChatPane(root, projectMode) {
   const title = h("div", { class: "pane-title" });
   const dot = h("i"), stxt = h("span");
   statusEls.push([dot, stxt]);
+  const SEARCH = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="6.7" cy="6.7" r="5"/><path d="M10.5 10.5 15 15"/></svg>`;
+  const sInput = h("input", { placeholder: projectMode ? "Search this chat" : "Search all chats" });
+  const sCount = h("span", { class: "cnt" });
+  const sBox = h("div", { class: "searchbox" }, h("span", { style: "display:grid;place-items:center;width:16px;flex:none;cursor:pointer", onclick: () => openSearch() }), sInput, sCount,
+    projectMode ? h("button", { title: "Previous", onclick: () => jump(-1) }, "˄") : null, projectMode ? h("button", { title: "Next", onclick: () => jump(1) }, "˅") : null,
+    h("button", { title: "Close search", onclick: () => closeSearch() }, "✕"));
+  sBox.firstChild.innerHTML = SEARCH;
   const head = h("div", { class: "pane-head" },
     projectMode ? h("button", { class: "back", onclick: () => openProject ? showProjectDetail(openProject) : showProjectList() }, "‹") : null,
     h("div", { class: "grow" }, title, h("div", { class: "status", onclick: () => status.ok ? openSettings() : invoke("start_ollama").then(() => setTimeout(pollStatus, 1500)).catch(e => modal("Ollama", h("div", {}, String(e)))) }, dot, stxt)),
+    sBox,
     projectMode ? null : h("button", { class: "chip", onclick: showHistory }, "Chats"),
     h("button", { class: "chip", onclick: () => { if (!busy) self.open(Store.newConv(projectMode ? conv.project : null)); } }, "New"));
   const list = h("div", { class: "msgs" });
+  const results = h("div", { class: "results hidden" });
+  let hits = [], hitIdx = 0, searching = false;
+  function openSearch() { if (searching) return; searching = true; head.classList.add("searching"); requestAnimationFrame(() => sBox.classList.add("open")); setTimeout(() => sInput.focus(), 120); }
+  function closeSearch() {
+    if (!searching) return; searching = false; sInput.value = ""; runSearch(""); sBox.classList.remove("open");
+    setTimeout(() => head.classList.remove("searching"), 260);
+  }
+  sInput.addEventListener("input", () => runSearch(sInput.value.trim()));
+  sInput.addEventListener("keydown", e => { if (e.key === "Escape") closeSearch(); if (e.key === "Enter") jump(e.shiftKey ? -1 : 1); });
+  const esc = t => t.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  const mark = (t, q) => { const e = esc(t); if (!q) return e; const pat = esc(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); return e.replace(new RegExp(pat, "gi"), m => `<mark>${m}</mark>`); };
+  function clearMarks() { list.querySelectorAll(".bubble[data-raw]").forEach(b => { b.innerHTML = b.dataset.raw; delete b.dataset.raw; b.classList.remove("hit"); }); hits = []; }
+  function findInChat(q, flash) {
+    clearMarks(); sCount.textContent = ""; if (!q) return;
+    hits = [...list.querySelectorAll(".bubble")].filter(b => b.textContent.toLowerCase().includes(q.toLowerCase()));
+    hits.forEach(b => { b.dataset.raw = b.innerHTML; b.innerHTML = mark(b.textContent, q); });
+    hitIdx = hits.length - 1; sCount.textContent = hits.length ? `${hitIdx + 1}/${hits.length}` : "0";
+    if (hits.length) showHit();
+    if (flash) setTimeout(() => { if (!searching) clearMarks(); }, 4000);
+  }
+  function showHit() { hits.forEach(b => b.classList.remove("hit")); const b = hits[hitIdx]; b.classList.add("hit"); b.scrollIntoView({ behavior: "smooth", block: "center" }); }
+  function jump(d) { if (!projectMode || !hits.length) return; hitIdx = (hitIdx + d + hits.length) % hits.length; sCount.textContent = `${hitIdx + 1}/${hits.length}`; showHit(); }
+  function runSearch(q) {
+    if (projectMode) return findInChat(q);
+    results.innerHTML = "";
+    if (!q) { results.classList.add("hidden"); list.classList.remove("hidden"); sCount.textContent = ""; return; }
+    results.classList.remove("hidden"); list.classList.add("hidden");
+    let n = 0; const ql = q.toLowerCase();
+    Store.regular().forEach(c => {
+      const ms = Store.msgs(c); const m = ms.find(x => (x.t || "").toLowerCase().includes(ql));
+      if (!c.title.toLowerCase().includes(ql) && !m) return; n++;
+      const card = h("div", { class: "card panel click" });
+      card.append(h("div", { class: "big" })); card.lastChild.innerHTML = mark(c.title, q);
+      if (m) { const i = m.t.toLowerCase().indexOf(ql), from = Math.max(0, i - 40); const sn = h("div", { class: "muted", style: "margin-top:4px" }); sn.innerHTML = mark((m.u ? "You: " : "claw: ") + (from ? "…" : "") + m.t.slice(from, i + q.length + 90).replace(/\n/g, " "), q); card.append(sn); }
+      card.append(h("div", { class: "muted", style: "font-size:11px;margin-top:4px" }, ago(c.updated)));
+      card.onclick = () => { if (busy) return; closeSearch(); self.open(c); setTimeout(() => findInChat(q, true), 60); };
+      results.append(card);
+    });
+    sCount.textContent = String(n);
+    if (!n) results.append(h("div", { class: "muted", style: "text-align:center;margin-top:30px" }, `No chats mention "${q}".`));
+  }
   const pend = h("div", { class: "pending hidden" });
   const input = h("textarea", { rows: 1, placeholder: projectMode ? "Message claw about this project" : "Message claw" });
   const picker = h("input", { type: "file", multiple: "", class: "hidden" });
@@ -471,7 +543,7 @@ function ChatPane(root, projectMode) {
   const sendBtn = h("button", { class: "cbtn send", title: "Send", style: "color:var(--on-accent)", onclick: () => self.send() });
   const setBusy = b => { busy = b; sendBtn.innerHTML = b ? `<div class="stopsq"></div>` : ARROW; sendBtn.title = b ? "Stop" : "Send"; };
   setBusy(false);
-  root.append(h("div", { class: "pane" }, head, list, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, sendBtn)), picker)));
+  root.append(h("div", { class: "pane" }, head, list, results, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, sendBtn)), picker)));
   self.input = input;
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(160, input.scrollHeight) + "px"; });
   input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); self.send(); } });
@@ -505,6 +577,7 @@ function ChatPane(root, projectMode) {
   function markStopped(b, partial) { b.classList.remove("hidden"); b.textContent = partial; b.append(h("span", { class: "stopnote" }, "Not finished · you stopped this reply")); }
 
   self.open = c => {
+    if (searching) closeSearch();
     conv = c; msgs = Store.msgs(c); pending = []; renderPending(); list.innerHTML = "";
     if (!projectMode) P.set("curChat", c.id);
     setTitle();
@@ -624,6 +697,7 @@ function openSettings() {
   } }, "Download model");
   const body = h("div", {}, lbl("Ollama address"), host, lbl("Model"), model, h("div", { class: "muted", style: "margin-top:8px" }, tip), pull, prog, pst,
     h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama").then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
+    h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"),
     lbl("Installed models"), installed);
   modal("Settings", body, [["Done", save, true]]);
   refresh();
@@ -649,6 +723,8 @@ function openLook() {
   body.append(...slider("Chat bubble opacity", "bubbleOpacity", 100, 100));
   const gs = h("input", { type: "checkbox" }); gs.checked = P.get("glass", false); gs.onchange = () => { P.set("glass", gs.checked); applyLook(); };
   body.append(lbl("Liquid glass"), h("label", { class: "switch" }, "Glass bubbles, cards and bars", gs));
+  body.append(lbl("Glass style"), swatches([["Liquid", "linear-gradient(135deg, rgba(255,255,255,.85), var(--accent), rgba(255,255,255,.6))"], ["Frosted", "linear-gradient(rgba(255,255,255,.45), rgba(255,255,255,.15))"]],
+    P.get("glassStyle", "Liquid"), n => { P.set("glassStyle", n); P.set("glass", true); rerender(); }));
   const tints = Object.entries(TINTS).map(([n, c]) => [n, n === "Theme" ? "var(--accent)" : `linear-gradient(135deg, ${c}e6, ${c}5a)`]);
   tints.push(["Custom", `linear-gradient(135deg, ${P.get("glassCustom", "#78c8ff")}, transparent)`]);
   body.append(lbl("Glass tint"), swatches(tints, P.get("glassTint", "Clear"), n => {
@@ -669,6 +745,210 @@ function pickWallFile(accept, key, wallName) {
   f.click();
 }
 
+
+// ---------- Models: every free model (Ollama library + all GGUF on Hugging Face) ----------
+const SUGGEST = [
+  ["gemma3:1b", 0.815e9, "Tiny and quick, good for simple chat", 0], ["llama3.2:3b", 2.0e9, "Fast all-rounder", 0],
+  ["qwen2.5-coder:3b", 1.9e9, "Coding help", 0], ["qwen3:4b", 2.5e9, "Thinks step by step, uses tools", 6],
+  ["gemma3:4b", 3.3e9, "Sees photos and videos", 6], ["qwen2.5vl:7b", 6.0e9, "Vision: reads images and screenshots", 12],
+  ["phi4-mini", 2.5e9, "Strong reasoning for its size", 6], ["llama3.1:8b", 4.9e9, "Smarter general model", 12],
+  ["qwen2.5-coder:7b", 4.7e9, "Best coder for 12–16 GB", 12], ["qwen2.5-coder:14b", 9.0e9, "Big coder for 24 GB+", 24],
+  ["gemma3:27b", 17e9, "Top quality, needs 32 GB+", 32],
+];
+const gb = b => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : (b / 1e6).toFixed(0) + " MB";
+const shortN = n => n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n);
+const ageOf = t => { if (!t) return ""; const d = Math.floor((Date.now() - t) / 864e5); return d < 1 ? "today" : d < 2 ? "yesterday" : d < 30 ? d + "d ago" : d < 365 ? Math.floor(d / 30) + "mo ago" : Math.floor(d / 365) + "y ago"; };
+const fetchText = url => invoke("http_get", { url, timeoutMs: 20000 });
+const normName = n => { n = n.toLowerCase(); return n.split("/").pop().includes(":") ? n : n + ":latest"; };
+const Catalog = {
+  async ollama(q, page, newest) {
+    const html = await fetchText(`https://ollama.com/search?q=${encodeURIComponent(q)}&p=${page + 1}&o=${newest ? "newest" : "popular"}`);
+    const more = html.includes('data-has-more="true"'), out = [];
+    html.split('<a href="/library/').slice(1).forEach(block => {
+      const name = block.slice(0, block.indexOf('"'));
+      if (!name || /[/:]/.test(name)) return;
+      const body = block.split("</li>")[0];
+      const desc = (body.match(/<p class="mt-1[^>]*>([^<]*)<\/p>/) || [])[1] || "";
+      const caps = [...body.matchAll(/text-indigo-600[^>]*>([^<]+)</g)].map(m => m[1].trim());
+      const sizes = [...body.matchAll(/bg-\[#ddf4ff\][^>]*>([^<]+)</g)].map(m => m[1].trim());
+      if (!sizes.length && body.includes(">cloud<")) return;
+      const dl = +((body.match(/title="([\d,]+) downloads"/) || [])[1] || "0").replace(/,/g, "");
+      const date = Date.parse((body.match(/title="Updated ([A-Za-z]+ \d+, \d{4})"/) || [])[1] || "") || 0;
+      out.push({ id: name, source: "ollama", title: name, desc: desc.replace(/&amp;/g, "&").replace(/&#39;/g, "'"), caps, stat: [dl ? shortN(dl) + " pulls" : "", sizes.join(" · ")].filter(Boolean).join(" · "), date, downloads: dl });
+    });
+    return [out, more];
+  },
+  async hf(q, page, newest) {
+    const per = 30;
+    const a = JSON.parse(await fetchText(`https://huggingface.co/api/models?search=${encodeURIComponent(q)}&filter=gguf&sort=${newest ? "trendingScore" : "likes"}&direction=-1&limit=${per * (page + 1)}`));
+    const out = a.slice(page * per).map(o => {
+      const tags = o.tags || [];
+      const caps = []; if (o.pipeline_tag === "image-text-to-text" || tags.includes("vision")) caps.push("vision");
+      if (tags.some(t => /code/i.test(t))) caps.push("code"); if (tags.some(t => /reason|think/i.test(t))) caps.push("thinking");
+      const base = (tags.find(t => t.startsWith("base_model:") && !t.includes(":quantized:") && !t.includes(":finetune:")) || "").replace("base_model:", "");
+      return { id: o.id, source: "hf", title: o.id.split("/")[1], desc: (base ? `Based on ${base} · ` : "") + "by " + o.id.split("/")[0], caps,
+        stat: `${shortN(o.downloads || 0)} downloads · ${shortN(o.likes || 0)} likes`, date: Date.parse(o.createdAt || "") || 0, downloads: o.downloads || 0 };
+    });
+    if (newest) out.sort((x, y) => y.date - x.date);
+    return [out, a.length >= per * (page + 1)];
+  },
+  async variants(e) {
+    if (e.source === "ollama") {
+      const html = await fetchText(`https://ollama.com/library/${encodeURIComponent(e.id)}/tags`); const seen = new Set();
+      return [...html.matchAll(/href="\/library\/([^"]+:[^"]+)" class="md:hidden[\s\S]*?<\/span>\s*•\s*([\d.]+\s*[KMGT]?B)\s*•\s*([^<•]*)/g)].filter(m => !seen.has(m[1]) && seen.add(m[1]))
+        .map(m => ({ pull: m[1], label: m[1].split(":")[1], bytes: parseSize(m[2]), note: m[3].trim().replace(/window$/, "").trim() }));
+    }
+    const files = JSON.parse(await fetchText(`https://huggingface.co/api/models/${e.id}/tree/main?recursive=true`)); const by = new Map();
+    files.forEach(f => {
+      if (f.type !== "file" || !/\.gguf$/i.test(f.path) || /mmproj/i.test(f.path)) return;
+      const m = f.path.split("/").pop().match(/(?:^|[-_.])((?:I?Q\d(?:_[A-Z0-9]+)*)|BF16|F16|F32)(?=[-_.])/i); if (!m) return;
+      const q = m[1].toUpperCase(); by.set(q, (by.get(q) || 0) + (f.size || f.lfs?.size || 0));
+    });
+    return [...by.entries()].sort((a, b) => a[1] - b[1]).map(([q, b]) => ({ pull: `hf.co/${e.id}:${q}`, label: q, bytes: b, note: q.startsWith("Q4_K_M") ? "recommended" : /^Q8|F16/.test(q) ? "highest quality" : "" }));
+  },
+};
+function parseSize(s) { const m = s.match(/([\d.]+)\s*([KMGT]?)B/); return m ? +m[1] * ({ K: 1e3, M: 1e6, G: 1e9, T: 1e12 }[m[2]] || 1) : 0; }
+function fitOf(bytes) {
+  if (!bytes || !SYS) return null; const r = bytes * 1.2 / SYS.memTotal;
+  return r < 0.6 ? ["Fits", "#50c878"] : r < 0.85 ? ["Tight fit", "#f0b43c"] : ["Too big", "#eb5a50"];
+}
+
+// Background download queue (keeps the PC awake while it runs).
+const DL = { jobs: [], running: false, listeners: new Set() };
+DL.notify = () => DL.listeners.forEach(f => f());
+DL.enqueue = pulls => { pulls.forEach(p => { if (!DL.jobs.some(j => j.pull === p && /queued|running/.test(j.state))) DL.jobs.push({ pull: p, state: "queued", status: "Queued", done: 0, total: 0 }); }); DL.notify(); DL.run(); };
+DL.cancel = pull => { const j = DL.jobs.find(j => j.pull === pull && /queued|running/.test(j.state)); if (!j) return; if (j.state === "running" && j.id) invoke("stop", { id: j.id }); j.state = "cancelled"; j.status = "Cancelled"; DL.notify(); };
+DL.run = async () => {
+  if (DL.running) return; DL.running = true; invoke("keep_awake", { on: true }).catch(() => {});
+  let j;
+  while ((j = DL.jobs.find(x => x.state === "queued"))) {
+    j.state = "running"; j.status = "Starting"; j.id = uid(); DL.notify();
+    for (let attempt = 1; j.state === "running"; attempt++) {
+      const res = await new Promise(resolve => {
+        let last = 0;
+        handlers[j.id] = {
+          out: line => { try { const o = JSON.parse(line); if (o.error) { j.err = o.error; return; } j.status = o.status; if (o.total) j.total = o.total; if (o.completed) j.done = o.completed; if (o.status === "success") j.ok = true; const n = Date.now(); if (n - last > 400) { last = n; DL.notify(); } } catch {} },
+          done: p => { delete handlers[j.id]; resolve(p); },
+        };
+        invoke("http_stream", { id: j.id, url: S.host + "/api/pull", body: JSON.stringify({ name: j.pull, stream: true }), event: "pull-line" });
+      });
+      if (j.state === "cancelled") break;
+      if (j.ok) { j.state = "done"; j.status = "Downloaded"; break; }
+      if (j.err || attempt > 5) { j.state = "failed"; j.status = j.err || res.error || "Failed"; break; }
+      j.status = `Connection lost, retrying (${attempt}/5)`; DL.notify(); await new Promise(r => setTimeout(r, 4000 * attempt)); j.id = uid();
+    }
+    DL.notify(); pollStatus();
+  }
+  DL.running = false; invoke("keep_awake", { on: false }).catch(() => {}); DL.notify();
+};
+
+// New-model watcher: checks every 6 hours while the app is open, shows NEW badges and a Home card.
+async function checkNewModels(force) {
+  if (!P.get("watchModels", true) && !force) return;
+  if (!force && Date.now() - P.get("lastModelCheck", 0) < 6 * 36e5) return;
+  let latest = [];
+  try { latest = latest.concat((await Catalog.ollama("", 0, true))[0]); } catch {}
+  try { latest = latest.concat((await Catalog.hf("", 0, true))[0].filter(e => e.downloads >= 1000)); } catch {}
+  if (!latest.length) return;
+  const seen = new Set(P.get("seenModels", [])), first = !seen.size;
+  const fresh = latest.filter(e => !seen.has(e.source + ":" + e.id));
+  latest.forEach(e => seen.add(e.source + ":" + e.id));
+  P.set("seenModels", [...seen].slice(-3000)); P.set("lastModelCheck", Date.now());
+  if (!first && fresh.length) { P.set("newModels", [...new Set([...P.get("newModels", []), ...fresh.map(e => e.source + ":" + e.id)])].slice(-200)); P.set("newModelNames", fresh.slice(0, 6).map(e => e.title)); if (tab === 0) renderHome(); }
+}
+
+function openModels() {
+  document.getElementById("models")?.remove();
+  const root = h("div", { id: "models" }); document.body.append(root);
+  let source = P.get("modelSource", "all"), newest = P.get("modelNewest", true), best = P.get("modelPopular", false), query = "", page = 0, gen = 0;
+  const selected = new Map(); let installed = new Set();
+  const newSet = new Set(P.get("newModels", [])); P.set("newModels", []); P.set("newModelNames", []);
+  const search = h("input", { class: "search", placeholder: "Search every model: qwen, llama, coder, vision…" });
+  const filters = h("div", { class: "chips" });
+  const dlBox = h("div"), picks = h("div"), results = h("div"), statusV = h("div", { class: "muted", style: "text-align:center;padding:14px" });
+  const more = h("button", { class: "chip", style: "display:block;margin:10px auto 20px" }, "Load more");
+  const go = h("button", { class: "btn-accent hidden", style: "margin:8px 0 0" });
+  root.append(h("div", { class: "row" }, h("button", { class: "back", onclick: () => close() }, "‹"), h("h1", { class: "grow", style: "margin:0" }, "Models"),
+      h("span", { class: "muted" }, SYS ? `RAM ${(SYS.memTotal / 1e9).toFixed(0)} GB` : "")),
+    search, filters, h("div", { class: "mlist" }, dlBox, picks, results, statusV, more), go);
+  const close = () => { DL.listeners.delete(renderDl); root.remove(); };
+  const sec = t => h("div", { class: "sec" }, t);
+  const updateGo = () => { go.classList.toggle("hidden", !selected.size); go.textContent = `Download ${selected.size} model${selected.size === 1 ? "" : "s"} · ${gb([...selected.values()].reduce((a, b) => a + b, 0))}`; };
+  function vrow(pull, label, bytes, note) {
+    const f = fitOf(bytes), inst = installed.has(normName(pull));
+    const btn = h("button", { class: "selbtn" });
+    const paint = () => { if (inst) { btn.className = "selbtn use"; btn.textContent = normName(S.model) === normName(pull) ? "In use" : "Use"; } else if (selected.has(pull)) { btn.className = "selbtn on"; btn.textContent = "✓ Selected"; } else { btn.className = "selbtn"; btn.textContent = "+ Select"; } };
+    btn.onclick = e => { e.stopPropagation(); if (inst) { P.set("model", pull); pollStatus(); paint(); return; } selected.has(pull) ? selected.delete(pull) : selected.set(pull, bytes); paint(); updateGo(); };
+    paint();
+    return h("div", { class: "vrow" }, h("div", { class: "grow" }, h("div", { style: "font-weight:600" }, label),
+      h("div", { class: "muted" }, bytes ? gb(bytes) + "  " : "", f ? h("span", { class: "badge", style: `color:${f[1]}` }, f[0]) : null, note ? "  " + note : "")), btn);
+  }
+  function card(e) {
+    const vbox = h("div", { class: "hidden" }); let loaded = false;
+    const c = h("div", { class: "mcard" },
+      h("div", { class: "row" }, h("div", { class: "t grow" }, e.title), newSet.has(e.source + ":" + e.id) ? h("span", { class: "badge", style: "color:var(--accent)" }, "NEW") : null, h("span", { class: "muted" }, e.source === "hf" ? "Hugging Face" : "Ollama")),
+      e.desc ? h("div", { style: "font-size:13px;margin-top:3px" }, e.desc) : null,
+      h("div", { class: "muted", style: "margin-top:4px" }, [ageOf(e.date), e.caps.join(" · "), e.stat].filter(Boolean).join("  ·  ")), vbox);
+    c.onclick = async () => {
+      vbox.classList.toggle("hidden"); if (loaded) return; loaded = true; vbox.innerHTML = ""; vbox.append(h("div", { class: "muted", style: "padding-top:8px" }, "Loading sizes…"));
+      try { const vs = await Catalog.variants(e); vbox.innerHTML = ""; if (!vs.length) vbox.append(h("div", { class: "muted" }, "No downloadable builds (cloud-only or not GGUF).")); vs.forEach(v => vbox.append(vrow(v.pull, v.label, v.bytes, v.note))); }
+      catch (err) { loaded = false; vbox.innerHTML = ""; vbox.append(h("div", { class: "muted" }, "Couldn't load. Click to retry.")); }
+    };
+    return c;
+  }
+  function renderPicks() {
+    picks.innerHTML = ""; if (query) return;
+    const mem = SYS ? SYS.memTotal : 8e9, list = SUGGEST.filter(s => s[3] <= mem / 1e9 + 0.5 && s[1] * 1.2 < mem * 0.85);
+    picks.append(sec("Suggested for this PC"), h("div", { class: "mcard", style: "cursor:default" }, list.map(s => vrow(s[0], s[0], s[1], s[2]))));
+  }
+  function renderDl() {
+    dlBox.innerHTML = ""; if (!DL.jobs.length) return;
+    dlBox.append(h("div", { class: "row" }, h("div", { class: "sec grow" }, "Downloads · the PC stays awake until they finish"),
+      DL.jobs.some(j => /done|failed|cancelled/.test(j.state)) ? h("button", { class: "chip", onclick: () => { DL.jobs = DL.jobs.filter(j => !/done|failed|cancelled/.test(j.state)); DL.notify(); } }, "Clear") : null));
+    dlBox.append(h("div", { class: "mcard", style: "cursor:default" }, DL.jobs.map(j => h("div", { class: "vrow" },
+      h("div", { class: "grow" }, h("div", { style: "font-weight:600" }, j.pull), h("div", { class: "muted" }, j.state === "running" && j.total ? `${gb(j.done)} of ${gb(j.total)} · ${j.status}` : j.status),
+        j.state === "running" ? h("progress", { max: 100, value: j.total ? j.done * 100 / j.total : 0 }) : null),
+      /queued|running/.test(j.state) ? h("button", { class: "selbtn", onclick: () => DL.cancel(j.pull) }, "✕") : null))));
+    if (DL.jobs.some(j => j.state === "done")) refreshInstalled();
+  }
+  async function refreshInstalled() { try { installed = new Set((JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).map(m => normName(m.name))); } catch {} }
+  async function load(reset) {
+    const g = ++gen; if (reset) { page = 0; results.innerHTML = ""; renderPicks(); } else page++;
+    more.classList.add("hidden"); statusV.textContent = "Loading…"; statusV.classList.remove("hidden");
+    const modes = [newest ? true : null, best ? false : null].filter(m => m !== null); if (!modes.length) modes.push(true);
+    let hasMore = false, err = null; const seenIds = new Set(); const sections = [];
+    for (const nw of modes) {
+      let a = [], b = [];
+      if (source !== "hf") try { const [l, m] = await Catalog.ollama(query, page, nw); a = l; hasMore ||= m; } catch (e) { err = String(e); }
+      if (source !== "ollama") try { const [l, m] = await Catalog.hf(query, page, nw); b = l; hasMore ||= m; } catch (e) { err = String(e); }
+      const merged = nw ? [...a, ...b].sort((x, y) => y.date - x.date) : Array.from({ length: Math.max(a.length, b.length) }, (_, i) => [a[i], b[i]]).flat().filter(Boolean);
+      sections.push([nw, merged.filter(e => !seenIds.has(e.source + e.id) && seenIds.add(e.source + e.id))]);
+    }
+    if (g !== gen) return;
+    sections.forEach(([nw, l]) => { if (!l.length) return; if (reset || modes.length > 1) results.append(sec((nw ? "Newest" : "Best") + (query ? ` · "${query}"` : " models"))); l.forEach(e => results.append(card(e))); });
+    const empty = !results.children.length;
+    statusV.classList.toggle("hidden", !empty); statusV.textContent = err ? "Couldn't reach the model catalogs: " + err : "Nothing found. Try another word.";
+    more.classList.toggle("hidden", !hasMore);
+  }
+  more.onclick = () => load(false);
+  function renderFilters() {
+    filters.innerHTML = "";
+    const box = (label, on, set, other) => { const cb = h("input", { type: "checkbox" }); cb.checked = on; cb.style.accentColor = "var(--accent)";
+      cb.onchange = () => { if (!cb.checked && !other()) { cb.checked = true; return; } set(cb.checked); load(true); };
+      filters.append(h("label", { class: "chip", style: "display:flex;gap:6px;align-items:center;cursor:pointer" }, cb, label)); };
+    box("Newest at top", newest, v => { newest = v; P.set("modelNewest", v); }, () => best);
+    box("Best models", best, v => { best = v; P.set("modelPopular", v); }, () => newest);
+    [["all", "All sources"], ["ollama", "Ollama"], ["hf", "Hugging Face"]].forEach(([k, l]) => filters.append(h("button", { class: "chip" + (source === k ? " on" : ""), onclick: () => { source = k; P.set("modelSource", k); renderFilters(); load(true); } }, l)));
+    const w = P.get("watchModels", true);
+    filters.append(h("button", { class: "chip", onclick: () => { P.set("watchModels", !w); renderFilters(); } }, w ? "🔔 New-model alerts on" : "🔕 New-model alerts off"));
+  }
+  let t; search.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { const q = search.value.trim(); if (q !== query) { query = q; load(true); } }, 400); });
+  go.onclick = () => { DL.enqueue([...selected.keys()]); selected.clear(); updateGo(); root.querySelector(".mlist").scrollTop = 0; renderPicks(); };
+  DL.listeners.add(renderDl); renderDl(); renderFilters();
+  refreshInstalled().then(() => load(true));
+  if (!P.get("seenModels", []).length) checkNewModels(true);
+}
+
 // ---------- boot ----------
 let chatPane, projPane;
 (async () => {
@@ -676,7 +956,7 @@ let chatPane, projPane;
   try { SYS = await invoke("sys_info"); } catch {}
   applyLook();
   statusEls.push([$("#topDot"), null]);
-  $("#btnSettings").onclick = openSettings; $("#btnLook").onclick = openLook;
+  $("#btnSettings").onclick = openSettings; $("#btnLook").onclick = openLook; $("#btnModels").onclick = openModels;
   chatPane = ChatPane($("#chat"), false);
   projPane = ChatPane($("#projChat"), true);
   const last = Store.convs.find(c => c.id === P.get("curChat", "") && !c.project);
@@ -689,5 +969,6 @@ let chatPane, projPane;
   // Try to start Ollama once if it isn't running locally.
   try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama").catch(() => {}); }
   pollStatus(); setInterval(pollStatus, 4000);
+  checkNewModels(false); setInterval(() => checkNewModels(false), 30 * 60000);
   addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 })();

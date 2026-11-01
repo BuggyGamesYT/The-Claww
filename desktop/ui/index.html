@@ -15,7 +15,7 @@
     <nav id="tabs" class="panel">
       <button data-tab="0">Home</button><button data-tab="1">Chat</button><button data-tab="2">Projects</button>
     </nav>
-    <button class="round panel" id="btnLook" title="Look">◐</button>
+    <div class="row"><button class="round panel" id="btnModels" title="Models">⇩</button><button class="round panel" id="btnLook" title="Look">◐</button></div>
   </header>
   <main id="pager">
     <div id="track">
@@ -30,6 +30,14 @@
   </main>
 </div>
 <div id="modal" class="hidden"><div id="sheet" class="panel solid"></div></div>
+<svg width="0" height="0" style="position:absolute">
+  <filter id="liquid-lens" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+    <feImage id="lens-map" x="0" y="0" width="100%" height="100%" preserveAspectRatio="none" result="map"/>
+    <feGaussianBlur in="SourceGraphic" stdDeviation="0.6" result="src"/>
+    <feDisplacementMap in="src" in2="map" scale="38" xChannelSelector="R" yChannelSelector="G" result="bent"/>
+    <feOffset in="bent" dx="0" dy="0"/>
+  </filter>
+</svg>
 <script src="app.js"></script>
 </body>
 </html>

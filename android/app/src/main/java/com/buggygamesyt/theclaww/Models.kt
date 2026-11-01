@@ -75,7 +75,7 @@ object Catalog {
     /** newest = trending GGUF uploads ordered by release date (pure "createdAt" is mostly 0-download noise). */
     fun hf(q: String, page: Int, newest: Boolean = true): Pair<List<CatalogEntry>, Boolean> {
         val per = 30
-        val json = JSONArray(get("https://huggingface.co/api/models?search=${enc(q)}&filter=gguf&sort=${if (newest) "trendingScore" else "downloads"}&direction=-1&limit=${per * (page + 1)}"))
+        val json = JSONArray(get("https://huggingface.co/api/models?search=${enc(q)}&filter=gguf&sort=${if (newest) "trendingScore" else "likes"}&direction=-1&limit=${per * (page + 1)}"))
         val out = mutableListOf<CatalogEntry>()
         for (i in page * per until json.length()) {
             val o = json.getJSONObject(i)
