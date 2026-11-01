@@ -118,7 +118,8 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("claww", Context.MODE_PRIVATE)
         Store.init(filesDir)
-        t = themes.firstOrNull { it.name == prefs.getString("theme", "Ember") } ?: themes[0]
+        val def = if (Build.VERSION.SDK_INT >= 31) "Material You" else "Ember"
+        t = allThemes().firstOrNull { it.name == prefs.getString("theme", def) } ?: themes[0]
         window.statusBarColor = bg
         window.navigationBarColor = bg
 
@@ -189,6 +190,23 @@ class MainActivity : Activity() {
         if (builtIn) startOllama()
         pollStatus()
     }
+
+    /** Material You: palette taken from the system's wallpaper-based dynamic colors (Android 12+), following dark/light mode. */
+    private fun materialYou(): Theme? {
+        if (Build.VERSION.SDK_INT < 31) return null
+        fun c(id: Int) = getColor(id)
+        val dark = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
+        return if (dark) Theme("Material You",
+            c(android.R.color.system_neutral1_900), c(android.R.color.system_neutral2_800), c(android.R.color.system_neutral2_700),
+            c(android.R.color.system_neutral1_50), c(android.R.color.system_neutral2_300),
+            c(android.R.color.system_accent1_200), c(android.R.color.system_accent1_800))
+        else Theme("Material You",
+            c(android.R.color.system_neutral1_10), c(android.R.color.system_neutral2_50), c(android.R.color.system_accent2_100),
+            c(android.R.color.system_neutral1_900), c(android.R.color.system_neutral2_600),
+            c(android.R.color.system_accent1_600), c(android.R.color.system_accent1_0))
+    }
+
+    private fun allThemes(): List<Theme> = listOfNotNull(materialYou()) + themes
 
     private fun styleTabs(sel: Int) {
         prefs.edit().putInt("tab", sel).apply()
@@ -1130,7 +1148,7 @@ class MainActivity : Activity() {
         }
         var dialog: AlertDialog? = null
         box.addView(label("Theme"))
-        box.addView(swatchRow(themes.map { th ->
+        box.addView(swatchRow(allThemes().map { th ->
             th.name to GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(th.surface, th.accent))
         }, t.name) { prefs.edit().putString("theme", it).apply(); dialog?.dismiss(); recreate() })
         box.addView(label("Wallpaper"))
