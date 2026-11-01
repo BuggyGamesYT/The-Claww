@@ -1,0 +1,92 @@
+name: Arch Linux package
+
+on:
+  push:
+    branches: [main, arch-linux]
+    paths:
+      - packaging/arch/**
+      - rust/**
+      - .github/workflows/arch-linux.yml
+  pull_request:
+    paths:
+      - packaging/arch/**
+      - .github/workflows/arch-linux.yml
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# contents: write only matters for the release upload step. Existing release
+# assets (e.g. TheClaww.apk) are left untouched; files are added alongside.
+permissions:
+  contents: write
+
+concurrency:
+  group: arch-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arch:
+    name: makepkg (x86_64)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build deps
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: /home/builder/.cargo/registry
+          key: arch-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: arch-cargo-
+
+      - name: Build package with makepkg
+        run: |
+          git config --global --add safe.directory '*'
+          git branch -f ci-build HEAD
+          chown -R builder:builder "$GITHUB_WORKSPACE" /home/builder
+          cd packaging/arch
+          sudo -u builder env \
+            CLAWW_REPO="file://$GITHUB_WORKSPACE" \
+            CLAWW_REF="branch=ci-build" \
+            HOME=/home/builder \
+            sh -c 'git config --global --add safe.directory "*" && makepkg --noconfirm --cleanbuild'
+          ls -la *.pkg.tar.zst
+
+      - name: Smoke test the package
+        run: |
+          cd packaging/arch
+          pacman -U --noconfirm the-claww-git-*.pkg.tar.zst
+          claw --version
+          grep -q 'qwen3-coder:30b' /etc/the-claww/env
+          pacman -Ql the-claww-git
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp packaging/arch/the-claww-git-*.pkg.tar.zst dist/
+          cp packaging/arch/src/the-claww/rust/target/release/claw dist/claw-linux-x86_64
+          cd dist && sha256sum * > SHA256SUMS-arch.txt && cat SHA256SUMS-arch.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: the-claww-arch-x86_64
+          path: dist/*
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            dist/the-claww-git-*.pkg.tar.zst
+            dist/claw-linux-x86_64
+            dist/SHA256SUMS-arch.txt
+          fail_on_unmatched_files: true

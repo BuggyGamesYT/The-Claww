@@ -1,0 +1,65 @@
+# Maintainer: Buggy Games YT <https://github.com/BuggyGamesYT>
+# Builds Claw Code (`claw`) from BuggyGamesYT/The-Claww and wires it to a local Ollama.
+#
+# Build overrides (optional, used by CI):
+#   CLAWW_REPO  git URL to build from   (default: https://github.com/BuggyGamesYT/The-Claww.git)
+#   CLAWW_REF   makepkg fragment        (default: branch=main, e.g. commit=<sha>)
+
+pkgname=the-claww-git
+_name=the-claww
+pkgver=0.1.9.r0.g0000000
+pkgrel=1
+pkgdesc="Claw Code: Rust agent CLI (claw), preconfigured for local Ollama"
+arch=('x86_64' 'aarch64')
+url="https://github.com/BuggyGamesYT/The-Claww"
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo' 'git')
+optdepends=('ollama: run models locally (default backend)'
+            'ollama-cuda: Ollama with NVIDIA GPU support'
+            'ollama-rocm: Ollama with AMD GPU support')
+provides=('claw' "${_name}")
+conflicts=('claw' "${_name}")
+backup=('etc/the-claww/env')
+install=the-claww-git.install
+options=('!lto' '!debug')
+source=("${_name}::git+${CLAWW_REPO:-https://github.com/BuggyGamesYT/The-Claww.git}#${CLAWW_REF:-branch=main}"
+        'claw-wrapper.sh'
+        'the-claww.env'
+        'settings.example.json')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+pkgver() {
+  cd "${_name}"
+  local ver
+  ver=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)
+  printf '%s.r%s.g%s' "${ver}" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "${_name}/rust"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${_name}/rust"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p rusty-claude-cli
+}
+
+package() {
+  # Real binary lives in /usr/lib; /usr/bin/claw is a tiny wrapper that
+  # applies the Ollama defaults from /etc/the-claww/env.
+  install -Dm755 "${_name}/rust/target/release/claw" "${pkgdir}/usr/lib/${_name}/claw"
+  install -Dm755 claw-wrapper.sh "${pkgdir}/usr/bin/claw"
+  install -Dm644 the-claww.env "${pkgdir}/etc/the-claww/env"
+
+  install -Dm644 "${_name}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+  local doc="${pkgdir}/usr/share/doc/${_name}"
+  install -Dm644 -t "${doc}" \
+    "${_name}/README.md" "${_name}/USAGE.md" "${_name}/CHANGELOG.md" \
+    "${_name}/packaging/arch/README.md" settings.example.json
+}

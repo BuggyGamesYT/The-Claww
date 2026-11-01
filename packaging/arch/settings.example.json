@@ -1,0 +1,5 @@
+{
+  "aliases": {
+    "coder": "qwen3-coder:30b"
+  }
+}
