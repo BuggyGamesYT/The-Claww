@@ -1078,20 +1078,27 @@ class MainActivity : Activity() {
             val body = msg.ifEmpty { "Please look at the attached file(s)." } + files
             val prompt = projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body")
             val pb = ProcessBuilder("${applicationInfo.nativeLibraryDir}/libclaw.so", "--model", runModel,
-                "--dangerously-skip-permissions", "prompt", prompt).directory(work).redirectErrorStream(true)
+                "--dangerously-skip-permissions", "--output-format", "json", "prompt", prompt).directory(work).redirectErrorStream(true)
             val e = pb.environment(); env(e)
             e["CLAW_CONFIG_HOME"] = File(filesDir, "home/.claw").absolutePath
             e["NO_COLOR"] = "1"; e["TERM"] = "dumb"; e["OLLAMA_HOST"] = host
             val p = pb.start(); proc = p; p.outputStream.close()
+            // claw answers with one JSON line at the end: show only the reply plus a short line per tool used,
+            // never the raw search results / tool output the model reads.
+            sb.setLength(0); sb.append("Working…"); show()
+            val raw = StringBuilder()
             p.inputStream.bufferedReader().use { r ->
                 val buf = CharArray(512)
                 while (true) {
                     val n = r.read(buf); if (n < 0) break
-                    sb.append(String(buf, 0, n).replace(ansi, "")); show()
+                    raw.append(String(buf, 0, n))
                 }
             }
             val code = p.waitFor()
-            if (!stopped && code != 0 && sb.isBlank()) { sb.append("claw stopped (code $code). Is a model downloaded?"); show() }
+            sb.setLength(0)
+            if (!stopped) sb.append(ToolSteps.reply(raw.toString().replace(ansi, "")))
+            if (!stopped && code != 0 && sb.isBlank()) sb.append("claw stopped (code $code). Is a model downloaded?")
+            show()
         }
 
         /** Images/videos go straight to Ollama's chat API so a vision model can actually see them. */
@@ -1267,6 +1274,9 @@ class MainActivity : Activity() {
                 pb.environment()["OLLAMA_KEEP_ALIVE"] = "30m"
                 pb.environment()["OLLAMA_NUM_PARALLEL"] = "1"
                 pb.environment()["OLLAMA_MAX_LOADED_MODELS"] = "1"
+                // Memory setting: a longer context lets the model remember more (uses more RAM).
+                val ctxLen = prefs.getInt("ctxLen", 0)
+                if (ctxLen > 0) pb.environment()["OLLAMA_CONTEXT_LENGTH"] = ctxLen.toString()
                 ollama = pb.start()
             } catch (e: Exception) {
                 runOnUiThread { android.widget.Toast.makeText(this, "Couldn't start built-in Ollama: ${e.message}", android.widget.Toast.LENGTH_LONG).show() }
@@ -1376,6 +1386,35 @@ class MainActivity : Activity() {
                   else "This device has ${"%.0f".format(ramGb)} GB RAM: best with 1–3B models like llama3.2:3b, qwen2.5-coder:1.5b, gemma3:1b.") +
                   "\nTo show it photos or videos, use a vision model like gemma3:4b or qwen2.5vl:3b."
         box.addView(TextView(this).apply { text = tip; setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(10)) })
+        // Memory (context length) for the built-in Ollama.
+        box.addView(label("Memory · how much of the chat and web pages the model can hold"))
+        val memOpts = listOf(0 to "Auto", 8192 to "8K", 16384 to "16K", 32768 to "32K", 65536 to "64K", 131072 to "128K")
+        val memRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val memNote = TextView(this).apply { setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(10)) }
+        fun paintMem() {
+            val cur = prefs.getInt("ctxLen", 0)
+            memRow.removeAllViews()
+            memOpts.forEach { (v, l) ->
+                memRow.addView(TextView(this).apply {
+                    text = l; textSize = 13f; gravity = Gravity.CENTER
+                    setTextColor(if (v == cur) t.onAccent else fg); background = round(if (v == cur) accent else surface2, 12)
+                    setPadding(dp(4), dp(8), dp(4), dp(8))
+                    setOnClickListener {
+                        if (v == prefs.getInt("ctxLen", 0)) return@setOnClickListener
+                        prefs.edit().putInt("ctxLen", v).apply(); paintMem()
+                        if (builtIn) thread {
+                            ollama?.let { o -> o.destroy(); try { o.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {} }
+                            ollama = null; startOllama()
+                        }
+                    }
+                }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { if (v != 0) leftMargin = dp(4) })
+            }
+            memNote.text = (if (cur == 0) "Auto lets Ollama pick." else "${memOpts.first { it.first == cur }.second} tokens of memory.") +
+                " Bigger uses more RAM and can be slower; 32K suits web searches on ${"%.0f".format(ramGb)} GB." +
+                (if (builtIn) "" else " Applies to the Ollama on this device only; on a PC set OLLAMA_CONTEXT_LENGTH.")
+        }
+        paintMem()
+        box.addView(memRow); box.addView(memNote)
         box.addView(pull, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)))
         box.addView(Button(this).apply {
             text = "Browse & download any model"; setTextColor(fg); background = round(surface2, 12); isAllCaps = false

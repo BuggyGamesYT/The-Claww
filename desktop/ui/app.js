@@ -517,6 +517,31 @@ const ARROW = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke
 const PLUS = `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round"><path d="M9 1.4v15.2M1.4 9h15.2"/></svg>`;
 const ansi = /\u001B\[[0-9;?]*[ -\/]*[@-~]/g;
 const handlers = {};  // job id -> {out, done}
+function clawReply(raw) {
+  let j = null;
+  for (const l of raw.split("\n").reverse()) {
+    const t = l.trim(); if (!t.startsWith("{")) continue;
+    try { const o = JSON.parse(t); if ("message" in o) { j = o; break; } } catch {}
+  }
+  if (!j) return raw.trim();
+  const short = (s, n = 70) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+  const steps = [...new Set((j.tool_uses || []).map(u => {
+    let i = u.input; if (typeof i === "string") { try { i = JSON.parse(i); } catch { i = {}; } } i = i || {};
+    const path = i.file_path || i.filePath || i.path;
+    switch (u.name) {
+      case "WebSearch": case "web_search": return `🔎 Searched the web: ${short(i.query)}`;
+      case "WebFetch": case "web_fetch": return `🌐 Read ${short(i.url)}`;
+      case "bash": case "Bash": return `⌨️ Ran ${short(i.command, 60)}`;
+      case "read_file": case "Read": return `📄 Read ${short(path)}`;
+      case "write_file": case "Write": return `✏️ Wrote ${short(path)}`;
+      case "edit_file": case "Edit": return `📝 Edited ${short(path)}`;
+      case "glob_search": case "Glob": case "grep_search": case "Grep": return `🔎 Searched files: ${short(i.pattern)}`;
+      case "TodoWrite": return "🗒️ Updated the to-do list";
+      default: return `🔧 Used ${u.name}`;
+    }
+  }))];
+  return (steps.length ? steps.join("\n") + "\n\n" : "") + String(j.message || "").trim();
+}
 listen("claw-out", p => handlers[p.id]?.out(p.chunk));
 listen("claw-done", p => handlers[p.id]?.done(p));
 listen("chat-line", p => handlers[p.id]?.out(p.line));
@@ -779,9 +804,16 @@ function ChatPane(root, projectMode) {
         const body = (text || "Please look at the attached file(s).") + files;
         const ctx = context(prior);
         const prompt = preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
+        // claw answers with one JSON line at the end: show only the reply plus a short line per tool used.
+        let raw = "";
+        acc = "Working…"; show();
         handlers[job] = {
-          out: chunk => { acc += chunk.replace(ansi, ""); show(); },
-          done: p => { if (!stopped && p.code !== 0 && !acc.trim()) { acc = `claw stopped (code ${p.code}). Is Ollama running and ${runModel} downloaded?`; show(); } finish(); },
+          out: chunk => { raw += chunk; },
+          done: p => {
+            acc = stopped ? "" : clawReply(raw.replace(ansi, ""));
+            if (!stopped && p.code !== 0 && !acc.trim()) acc = `claw stopped (code ${p.code}). Is Ollama running and ${runModel} downloaded?`;
+            show(); finish();
+          },
         };
         await invoke("ensure_dir", { path: workDir() });
         await invoke("claw_run", { id: job, prompt, model: runModel, host: S.host, cwd: workDir() });

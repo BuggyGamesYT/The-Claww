@@ -57,7 +57,7 @@ fn ensure_dir(path: String) -> Result<String, String> {
 fn claw_run(app: AppHandle, jobs: State<'_, Jobs>, id: String, prompt: String, model: String, host: String, cwd: String) -> Result<(), String> {
     let _ = std::fs::create_dir_all(&cwd);
     let mut cmd = Command::new(claw_path());
-    cmd.args(["--model", &model, "--dangerously-skip-permissions", "prompt", &prompt])
+    cmd.args(["--model", &model, "--dangerously-skip-permissions", "--output-format", "json", "prompt", &prompt])
         .current_dir(&cwd)
         .env("OLLAMA_HOST", &host)
         .env("NO_COLOR", "1")
