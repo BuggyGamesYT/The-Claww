@@ -191,3 +191,7 @@ body.wide #projSide { display: block; width: 28%; flex: none; overflow-y: auto; 
 .bubble.thinking { background: color-mix(in srgb, var(--surface2) 45%, transparent) !important; color: var(--muted) !important;
   border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent); border-radius: 999px; animation: claww-pulse 1.8s ease-in-out infinite; }
 @keyframes claww-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+
+/* Messages fade into nothing at the top and bottom edges while scrolling */
+.msgs { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 56px, #000 calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 56px, #000 calc(100% - 28px), transparent 100%); }

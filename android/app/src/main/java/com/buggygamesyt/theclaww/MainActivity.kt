@@ -613,7 +613,11 @@ class MainActivity : Activity() {
         private val sub = text("", 12f, muted)
         private val subDot = View(this@MainActivity)
         val chat = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(4), dp(16), dp(16)) }
-        val scroll = ScrollView(this@MainActivity).apply { addView(chat); isFillViewport = true }
+        // Messages fade into nothing at the top and bottom edges while scrolling (fades to transparent, so wallpapers show through).
+        val scroll = ScrollView(this@MainActivity).apply {
+            addView(chat); isFillViewport = true
+            isVerticalFadingEdgeEnabled = true; setFadingEdgeLength(dp(56)); overScrollMode = View.OVER_SCROLL_NEVER
+        }
         private val attRow = LinearLayout(this@MainActivity).apply { setPadding(dp(10), dp(8), dp(10), 0) }
         private val attScroll = HorizontalScrollView(this@MainActivity).apply { isHorizontalScrollBarEnabled = false; addView(attRow); visibility = View.GONE }
         private val pending = mutableListOf<Att>()
