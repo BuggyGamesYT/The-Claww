@@ -1,6 +1,6 @@
 name: Claww release (Android + Windows + Linux)
 
-# One combined release: Android APK, Windows installer, Linux AppImage/.deb (Arch: use the AppImage).
+# One combined release: Android APK, Windows installer, Arch Linux .pkg.tar.zst (plus AppImage/.deb for other distros).
 # Marked Latest so it always sits on top. Started by upstream-sync.yml or by hand.
 on:
   workflow_dispatch:
@@ -48,8 +48,8 @@ jobs:
             echo "|---|---|"
             echo "| **TheClaww.apk** | Android arm64: Pixel Tablet, Pixel 10 Pro XL and other 64-bit phones/tablets. Ollama runs inside the app. |"
             echo "| **TheClaww-windows-x64-setup.exe** | Windows 10/11 installer. Install Ollama for Windows first. |"
-            echo "| **TheClaww-linux-x86_64.AppImage** | Arch Linux (and any distro): \`chmod +x\` then run. Needs \`ollama\` (pacman -S ollama). |"
-            echo "| **TheClaww-linux-amd64.deb** | Debian / Ubuntu. |"
+            echo "| **TheClaww-arch-x86_64.pkg.tar.zst** | Arch Linux: \`sudo pacman -U TheClaww-arch-x86_64.pkg.tar.zst\`, then \`sudo pacman -S ollama\`. |"
+            echo "| TheClaww-linux-x86_64.AppImage / TheClaww-linux-amd64.deb | Other distros (Debian/Ubuntu etc.). |"
             echo
             echo "Built from \`android-app\` at ${GITHUB_SHA::7}. Upstream claw-code: ${up}."
             [ -n "$EXTRA" ] && { echo; echo "$EXTRA"; }

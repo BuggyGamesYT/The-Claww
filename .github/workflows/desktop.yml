@@ -83,3 +83,84 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ inputs.release_tag }}" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Native Arch Linux package (.pkg.tar.zst, install with pacman -U), built inside an Arch container
+  # so it links against Arch's own webkit2gtk-4.1.
+  arch:
+    name: desktop-arch
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    permissions:
+      contents: write
+    steps:
+      - name: Arch build deps
+        run: |
+          pacman -Syu --noconfirm --needed git rust nodejs npm webkit2gtk-4.1 gtk3 librsvg openssl github-cli
+      - uses: actions/checkout@v4
+      - name: Build claw + app
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          (cd rust && cargo build --release -p rusty-claude-cli)
+          TRIPLE=$(rustc -vV | sed -n 's/host: //p')
+          mkdir -p desktop/src-tauri/binaries
+          cp rust/target/release/claw "desktop/src-tauri/binaries/claw-$TRIPLE"
+          cd desktop
+          npm install --no-audit --no-fund
+          npx tauri icon app-icon.png
+          npx tauri build --no-bundle
+      - name: makepkg
+        shell: bash
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' desktop/src-tauri/Cargo.toml | head -1)
+          useradd -m builder
+          P=/home/builder/pkg; mkdir -p $P
+          cp desktop/src-tauri/target/release/the-claww rust/target/release/claw desktop/src-tauri/icons/128x128.png $P/
+          cat > $P/the-claww.desktop <<'DESK'
+          [Desktop Entry]
+          Name=The Claww
+          Comment=Local AI agent with Ollama
+          Exec=the-claww
+          Icon=the-claww
+          Terminal=false
+          Type=Application
+          Categories=Development;Utility;
+          DESK
+          sed -i 's/^ *//' $P/the-claww.desktop
+          cat > $P/PKGBUILD <<PKG
+          pkgname=the-claww
+          pkgver=$ver
+          pkgrel=1
+          pkgdesc="The Claww: local AI agent app (claw-code + Ollama)"
+          arch=(x86_64)
+          url="https://github.com/BuggyGamesYT/The-Claww"
+          license=(MIT)
+          depends=(webkit2gtk-4.1 gtk3 openssl)
+          optdepends=('ollama: run models on this PC')
+          options=(!debug !strip)
+          source=(the-claww claw the-claww.desktop 128x128.png)
+          sha256sums=(SKIP SKIP SKIP SKIP)
+          package() {
+            install -Dm755 the-claww "\$pkgdir/usr/lib/the-claww/the-claww"
+            install -Dm755 claw "\$pkgdir/usr/lib/the-claww/claw"
+            install -dm755 "\$pkgdir/usr/bin"
+            ln -s /usr/lib/the-claww/the-claww "\$pkgdir/usr/bin/the-claww"
+            install -Dm644 the-claww.desktop "\$pkgdir/usr/share/applications/the-claww.desktop"
+            install -Dm644 128x128.png "\$pkgdir/usr/share/icons/hicolor/128x128/apps/the-claww.png"
+          }
+          PKG
+          sed -i 's/^          //' $P/PKGBUILD
+          chown -R builder $P
+          su builder -c "cd $P && makepkg --nodeps --noconfirm"
+          mkdir -p dist && cp $P/*.pkg.tar.zst dist/TheClaww-arch-x86_64.pkg.tar.zst
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with: { name: "TheClaww-arch", path: dist/ }
+      - name: Attach to release
+        if: inputs.release_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          gh release upload "${{ inputs.release_tag }}" dist/* --clobber --repo "$GITHUB_REPOSITORY"
