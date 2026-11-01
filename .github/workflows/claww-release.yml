@@ -53,6 +53,7 @@ jobs:
             echo
             echo "Built from \`android-app\` at ${GITHUB_SHA::7}. Upstream claw-code: ${up}."
             [ -n "$EXTRA" ] && { echo; echo "$EXTRA"; }
+            echo; cat .github/release-install.md
           } > notes.md
           gh release create "$tag" --draft --target "$GITHUB_SHA" \
             --title "The Claww v${ver} · PC & Android (Pixel Tablet & Pixel 10 Pro XL) + Arch Linux & Windows desktop app" --notes-file notes.md
