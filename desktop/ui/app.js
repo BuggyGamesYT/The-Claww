@@ -131,13 +131,20 @@ function applyLook() {
     // Crash guard: if the app died while a video wallpaper was starting, the next launch skips it.
     if (P.get("videoBoot", 0) >= 2) { P.set("wall", "None"); P.set("videoBoot", 0); setTimeout(() => modal("Video wallpaper turned off", h("div", {}, "The app closed while starting your video wallpaper, so it's been switched off. On Arch, install video codecs with: sudo pacman -S gst-libav gst-plugins-good gst-plugins-bad, then pick the video again in Look.")), 800); return applyLook(); }
     P.set("videoBoot", P.get("videoBoot", 0) + 1);
-    const v = h("video", { src: fileSrc(P.get("wallVideo", "")), autoplay: "", loop: "", playsinline: "" }); v.muted = true;
+    const vp = P.get("wallVideo", "");
+    const v = h("video", { autoplay: "", loop: "", playsinline: "" }); v.muted = true;
+    // WebKitGTK's media player (GStreamer) can't stream from Tauri's asset:// scheme and shows black, so on Linux play it from a blob URL.
+    if (/Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)) {
+      (wallBlob.path === vp ? Promise.resolve(wallBlob.url) : blobUrl({ path: vp, mime: mimeOf(vp) }).then(u => { if (wallBlob.url) URL.revokeObjectURL(wallBlob.url); wallBlob = { path: vp, url: u }; return u; }))
+        .then(u => { v.src = u; v.play().catch(() => {}); }).catch(() => { P.set("videoBoot", 0); v.remove(); });
+    } else v.src = fileSrc(vp);
     v.addEventListener("playing", () => setTimeout(() => P.set("videoBoot", 0), 4000), { once: true });
     v.addEventListener("error", () => { P.set("videoBoot", 0); v.remove(); wall.style.background = "var(--bg)"; }, { once: true });
     wall.append(v);
   }
 }
 
+let wallBlob = { path: "", url: "" };
 function startAnimated(wall, kind, bg, cols) {
   const cv = h("canvas"); wall.append(cv);
   const ctx = cv.getContext("2d");
