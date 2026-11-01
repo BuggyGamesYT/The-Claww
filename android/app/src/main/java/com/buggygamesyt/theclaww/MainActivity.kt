@@ -716,8 +716,9 @@ class MainActivity : Activity() {
         @android.annotation.TargetApi(31)
         private fun acceptPastedFiles() {
             input.setOnReceiveContentListener(arrayOf("image/*", "video/*", "application/*")) { _, payload ->
-                val parts = payload.partition { it.uri != null }
-                parts.first?.clip?.let { cl -> for (i in 0 until cl.itemCount) cl.getItemAt(i).uri?.let { importAttachment(this@ChatPane, it) } }
+                val parts = payload.partition(java.util.function.Predicate<android.content.ClipData.Item> { item -> item.uri != null })
+                val files: android.view.ContentInfo? = parts.first
+                if (files != null) { val cl = files.clip; for (i in 0 until cl.itemCount) { val u: Uri? = cl.getItemAt(i).uri; if (u != null) importAttachment(this@ChatPane, u) } }
                 parts.second
             }
         }

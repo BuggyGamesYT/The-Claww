@@ -262,7 +262,7 @@ let wide = false;
 const pageCount = () => wide ? 2 : 3;
 const pageOf = t => wide ? Math.max(0, t - 1) : t;
 function applyWide() {
-  const w = innerWidth > innerHeight && innerWidth >= 900;
+  const w = innerWidth >= 900 && innerWidth > innerHeight;
   if (w === wide && document.body.dataset.wideInit) return;
   wide = w; document.body.dataset.wideInit = 1; document.body.classList.toggle("wide", wide);
   const home = $("#home");
@@ -271,6 +271,8 @@ function applyWide() {
   if (wide && openProject && !$("#projChat").classList.contains("hidden")) renderProjSide();
 }
 addEventListener("resize", () => applyWide());
+// Never let focus or find-in-page scroll the pager (or a page) sideways: the track's transform alone picks the tab.
+[pager, ...document.querySelectorAll("#track > .page, #app")].forEach(el => el.addEventListener("scroll", () => { if (el.scrollLeft) el.scrollLeft = 0; }));
 function go(i, anim = true) {
   tab = Math.max(wide ? 1 : 0, Math.min(2, i)); P.set("tab", tab);
   track.classList.toggle("drag", !anim);

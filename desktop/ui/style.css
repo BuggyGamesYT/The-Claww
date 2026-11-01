@@ -200,3 +200,21 @@ body.wide #projSide { display: block; width: 28%; flex: none; overflow-y: auto; 
 .memrow { display: flex; gap: 4px; }
 .memrow .chip { flex: 1; text-align: center; padding: 8px 4px; border-radius: 12px; }
 .memrow .chip:disabled { opacity: .6; cursor: progress; }
+
+/* ---- Responsive: nothing spills past the window edge ----
+   Focusing a field (message box, search) used to scroll the overflow:hidden pager sideways, pulling Home into
+   view and pushing Chat off the right edge. overflow: clip can't be scrolled at all; app.js also snaps it back. */
+html, body, #app { max-width: 100vw; overflow-x: hidden; }
+#pager, .page, .layer { overflow: hidden; overflow: clip; }
+#top { min-width: 0; }
+#tabs { min-width: 0; flex-shrink: 1; }
+#tabs button { padding: 8px clamp(10px, 2.4vw, 18px); white-space: nowrap; }
+.pane, .msgs, .results, #projChatPane, .composer-wrap, .composer, .bar, .pane-head { min-width: 0; max-width: 100%; }
+.bar textarea { min-width: 0; width: 100%; }
+.bubble, .suggest { overflow-wrap: anywhere; }
+.msgs, .results { overflow-x: hidden; }
+/* Below 900px only the active tab shows: Home and the projects sidebar never sit beside Chat. */
+@media (max-width: 899px) {
+  body.wide #chat > #home, body.wide #projSide { display: none; }
+  .pane-head { padding-left: 10px; padding-right: 10px; }
+}
