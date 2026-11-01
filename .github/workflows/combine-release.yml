@@ -1,0 +1,44 @@
+name: Combine release assets
+
+# Puts the Android APK and the Arch Linux package in one release.
+# - On a published v* release: copies TheClaww.apk from the newest android-v* release.
+# - Manually / on push of this file: copies between the tags given below.
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [arch-linux]
+    paths: [.github/workflows/combine-release.yml]
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Release to copy the APK from (blank = newest android-v*)
+        default: ''
+      target_tag:
+        description: Release to copy it into
+        default: v0.1.9-arch.1
+
+permissions:
+  contents: write
+
+jobs:
+  combine:
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Copy APK into release
+        run: |
+          target="${{ github.event.release.tag_name || inputs.target_tag || 'v0.1.9-arch.1' }}"
+          source="${{ inputs.source_tag }}"
+          if [ -z "$source" ]; then
+            source=$(gh release list --limit 50 --json tagName,isDraft \
+              -q '[.[] | select(.isDraft|not) | select(.tagName|startswith("android-v"))][0].tagName')
+          fi
+          [ -n "$source" ] || { echo "No android-v* release found"; exit 0; }
+          echo "Copying APK from $source into $target"
+          mkdir -p apk && gh release download "$source" --pattern '*.apk' --dir apk
+          gh release upload "$target" apk/*.apk --clobber
