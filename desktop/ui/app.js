@@ -527,7 +527,8 @@ function videoSrc(path, mime, viaBlob) {
 }
 const dropSrc = v => { const u = v.getAttribute("src") || ""; v.pause(); v.removeAttribute("src"); v.load(); if (u.startsWith("blob:")) URL.revokeObjectURL(u.split("#")[0]); };
 let ffmpegOk = null;
-const hasFfmpeg = async () => { if (ffmpegOk === null) { try { ffmpegOk = !!(await invoke("ffmpeg_available")); } catch { ffmpegOk = false; } } return ffmpegOk; };
+// Remember a yes; check again after a no, so installing ffmpeg works without reopening the app.
+const hasFfmpeg = async () => { if (ffmpegOk !== true) { try { ffmpegOk = !!(await invoke("ffmpeg_available")); } catch { ffmpegOk = false; } } return ffmpegOk; };
 // Resolves true once the video has a decoded picture (videoWidth > 0 and a frame loaded), false on error or timeout.
 function videoDecodes(v, ms = 7000) {
   return new Promise(res => {

@@ -472,9 +472,34 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 // ---------- Videos the web view can't play: open in the system player, or make a playable copy with ffmpeg ----------
+/// Where ffmpeg is: PATH first, then the usual install folders (an app started from the desktop menu can get a
+/// shorter PATH than the terminal).
+fn ffmpeg_path() -> PathBuf {
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&paths) { let f = d.join(name); if f.is_file() { return f; } }
+    }
+    let mut extra: Vec<PathBuf> = ["/usr/bin", "/usr/local/bin", "/bin", "/opt/homebrew/bin", "/snap/bin", "/var/lib/flatpak/exports/bin"].iter().map(PathBuf::from).collect();
+    if let Some(h) = std::env::var_os("HOME") { extra.push(PathBuf::from(h).join(".local/bin")); }
+    if cfg!(windows) {
+        for v in ["ProgramFiles", "LOCALAPPDATA", "USERPROFILE"] {
+            if let Some(b) = std::env::var_os(v) {
+                let b = PathBuf::from(b);
+                extra.extend([b.join("ffmpeg\\bin"), b.join("Microsoft\\WinGet\\Links"), b.join("scoop\\shims")]);
+            }
+        }
+        extra.push(PathBuf::from("C:\\ffmpeg\\bin"));
+        extra.push(PathBuf::from("C:\\ProgramData\\chocolatey\\bin"));
+    }
+    extra.into_iter().map(|d| d.join(name)).find(|f| f.is_file()).unwrap_or_else(|| PathBuf::from(name))
+}
+
 fn ffmpeg_cmd() -> Command {
-    let mut c = Command::new(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+    let mut c = Command::new(ffmpeg_path());
     c.stdin(Stdio::null());
+    // The system's ffmpeg must load the system's libraries, not ones an AppImage (or the web view) points at.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    { c.env_remove("LD_LIBRARY_PATH"); c.env_remove("LD_PRELOAD"); }
     no_window(&mut c);
     c
 }
