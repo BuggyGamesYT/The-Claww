@@ -139,9 +139,6 @@ class MainActivity : Activity() {
             background = panel(20)
             addView(TextView(this@MainActivity).apply { text = "⚙"; textSize = 18f; setTextColor(fg); gravity = Gravity.CENTER },
                 FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-            val dot = View(this@MainActivity).apply { background = round(muted, 5) }
-            addView(dot, FrameLayout.LayoutParams(dp(10), dp(10), Gravity.TOP or Gravity.END).apply { topMargin = dp(4); rightMargin = dp(4) })
-            statusViews.add(dot to TextView(this@MainActivity))
             setOnClickListener { openSettings() }
         }
         val lookBtn = FrameLayout(this).apply {

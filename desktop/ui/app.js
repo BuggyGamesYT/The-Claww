@@ -955,7 +955,6 @@ let chatPane, projPane;
   try { PATHS = await invoke("paths"); PATHS.data = String(PATHS.data).replace(/\\/g, "/"); PATHS.workspace = String(PATHS.workspace).replace(/\\/g, "/"); } catch {}
   try { SYS = await invoke("sys_info"); } catch {}
   applyLook();
-  statusEls.push([$("#topDot"), null]);
   $("#btnSettings").onclick = openSettings; $("#btnLook").onclick = openLook; $("#btnModels").onclick = openModels;
   chatPane = ChatPane($("#chat"), false);
   projPane = ChatPane($("#projChat"), true);
