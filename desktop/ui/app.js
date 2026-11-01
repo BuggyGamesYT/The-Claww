@@ -111,6 +111,8 @@ function applyLook() {
   r.setProperty("--bubble-op", (P.get("bubbleOpacity", 100) / 100).toFixed(2));
   r.setProperty("--wall-blur", P.get("blur", 0) + "px");
   r.setProperty("--dim", (P.get("dim", 45) / 100).toFixed(2));
+  r.setProperty("--lg-blur", (P.get("glassBlur", 45) * 0.32).toFixed(1) + "px");
+  r.setProperty("--lg-rim", (P.get("glassRim", 30) / 100).toFixed(2));
   const liquid = P.get("glass", false) && P.get("glassStyle", "Liquid") === "Liquid";
   document.body.classList.toggle("glass", P.get("glass", false) && !liquid);
   document.body.classList.toggle("liquid", liquid);
@@ -229,12 +231,26 @@ async function pollStatus() {
 // ---------- pager ----------
 const track = $("#track"), pager = $("#pager");
 let tab = P.get("tab", 1);
+// Wide = landscape window at tablet/PC size: Home merges into the left of Chat (no Home tab) and project chats get a sidebar.
+let wide = false;
+const pageCount = () => wide ? 2 : 3;
+const pageOf = t => wide ? Math.max(0, t - 1) : t;
+function applyWide() {
+  const w = innerWidth > innerHeight && innerWidth >= 900;
+  if (w === wide && document.body.dataset.wideInit) return;
+  wide = w; document.body.dataset.wideInit = 1; document.body.classList.toggle("wide", wide);
+  const home = $("#home");
+  if (wide) { $("#chat").prepend(home); if (tab === 0) tab = 1; } else track.prepend(home);
+  go(tab, false); if (wide) renderHome();
+  if (wide && openProject && !$("#projChat").classList.contains("hidden")) renderProjSide();
+}
+addEventListener("resize", () => applyWide());
 function go(i, anim = true) {
-  tab = Math.max(0, Math.min(2, i)); P.set("tab", tab);
+  tab = Math.max(wide ? 1 : 0, Math.min(2, i)); P.set("tab", tab);
   track.classList.toggle("drag", !anim);
-  track.style.transform = `translateX(${-tab * 100 / 3}%)`;
+  track.style.transform = `translateX(${-pageOf(tab) * 100 / pageCount()}%)`;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", +b.dataset.tab === tab));
-  if (tab === 0) renderHome();
+  if (tab === 0 || (wide && tab === 1)) renderHome();
   if (tab === 2 && !openProject) showProjectList();
 }
 document.querySelectorAll("#tabs button").forEach(b => b.addEventListener("click", () => go(+b.dataset.tab)));
@@ -248,9 +264,9 @@ addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && ["1", "2", "3
     const dx = e.clientX - sx, dy = e.clientY - sy;
     if (!drag && Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.4) { drag = true; track.classList.add("drag"); try { pager.setPointerCapture(id); } catch {} }
     if (drag) {
-      let off = -tab * w + dx; const min = -2 * w;
+      const n = pageCount(); let off = -pageOf(tab) * w + dx; const min = -(n - 1) * w;
       if (off > 0) off /= 3; if (off < min) off = min + (off - min) / 3;
-      track.style.transform = `translateX(${off / 3 / w * 100}%)`;
+      track.style.transform = `translateX(${off / n / w * 100}%)`;
     }
   });
   const end = e => {
@@ -416,7 +432,18 @@ function showProjectDetail(p) {
   showLayer(1);
 }
 function confirmDelete(cv, after) { modal(`Delete "${cv.title}"?`, h("div"), [["Cancel", null], ["Delete", () => { Store.deleteConv(cv); after(); }, true]]); }
-function openProjectChat(cv) { openProject = Store.project(cv.project); projPane.open(cv); showLayer(2); }
+function openProjectChat(cv) { openProject = Store.project(cv.project); projPane.open(cv); showLayer(2); if (wide) renderProjSide(); }
+function renderProjSide() {
+  const side = $("#projSide"); side.innerHTML = "";
+  side.append(h("div", { class: "row", style: "margin-bottom:12px" }, h("div", { class: "lbl grow", style: "margin:0" }, "Projects"),
+    h("button", { class: "chip", onclick: () => newProject(p => openProjectChat(Store.ofProject(p.id)[0] || Store.newConv(p.id))) }, "+")));
+  [...Store.projects].sort((a, b) => b.updated - a.updated).forEach(p => {
+    const on = openProject && p.id === openProject.id;
+    side.append(h("div", { class: "side-proj" + (on ? " on" : ""), title: "Click to open · right-click for project details",
+      onclick: () => openProjectChat(Store.ofProject(p.id)[0] || Store.newConv(p.id)), oncontextmenu: e => { e.preventDefault(); showProjectDetail(p); } }, p.name));
+    if (on) Store.ofProject(p.id).forEach(cv => side.append(h("div", { class: "side-chat" + (projPane.conv && projPane.conv.id === cv.id ? " on" : ""), onclick: () => openProjectChat(cv) }, cv.title)));
+  });
+}
 function openConv(cv) {
   if (!cv.project) { chatPane.open(cv); go(1); }
   else { const p = Store.project(cv.project); if (p) showProjectDetail(p); openProjectChat(cv); go(2); }
@@ -497,9 +524,14 @@ function ChatPane(root, projectMode) {
   const list = h("div", { class: "msgs" });
   const results = h("div", { class: "results hidden" });
   let hits = [], hitIdx = 0, searching = false;
-  function openSearch() { if (searching) return; searching = true; head.classList.add("searching"); requestAnimationFrame(() => sBox.classList.add("open")); setTimeout(() => sInput.focus(), 120); }
+  let who = P.get("searchWho", "all");   // all = both, me = only mine, ai = only claw's
+  const whoOk = user => who === "all" || (who === "me") === !!user;
+  const whoRow = h("div", { class: "chips who hidden" });
+  const renderWho = () => { whoRow.innerHTML = ""; [["all", "Both"], ["me", "Only mine"], ["ai", "Only AI"]].forEach(([k, l]) => whoRow.append(h("button", { class: "chip" + (who === k ? " on" : ""), onclick: () => { who = k; P.set("searchWho", k); renderWho(); runSearch(sInput.value.trim()); } }, l))); };
+  renderWho();
+  function openSearch() { if (searching) return; searching = true; head.classList.add("searching"); whoRow.classList.remove("hidden"); requestAnimationFrame(() => sBox.classList.add("open")); setTimeout(() => sInput.focus(), 120); }
   function closeSearch() {
-    if (!searching) return; searching = false; sInput.value = ""; runSearch(""); sBox.classList.remove("open");
+    if (!searching) return; searching = false; sInput.value = ""; runSearch(""); whoRow.classList.add("hidden"); sBox.classList.remove("open");
     setTimeout(() => head.classList.remove("searching"), 260);
   }
   sInput.addEventListener("input", () => runSearch(sInput.value.trim()));
@@ -509,7 +541,7 @@ function ChatPane(root, projectMode) {
   function clearMarks() { list.querySelectorAll(".bubble[data-raw]").forEach(b => { b.innerHTML = b.dataset.raw; delete b.dataset.raw; b.classList.remove("hit"); }); hits = []; }
   function findInChat(q, flash) {
     clearMarks(); sCount.textContent = ""; if (!q) return;
-    hits = [...list.querySelectorAll(".bubble")].filter(b => b.textContent.toLowerCase().includes(q.toLowerCase()));
+    hits = [...list.querySelectorAll(".bubble")].filter(b => whoOk(b.closest(".msg")?.classList.contains("user")) && b.textContent.toLowerCase().includes(q.toLowerCase()));
     hits.forEach(b => { b.dataset.raw = b.innerHTML; b.innerHTML = mark(b.textContent, q); });
     hitIdx = hits.length - 1; sCount.textContent = hits.length ? `${hitIdx + 1}/${hits.length}` : "0";
     if (hits.length) showHit();
@@ -524,8 +556,8 @@ function ChatPane(root, projectMode) {
     results.classList.remove("hidden"); list.classList.add("hidden");
     let n = 0; const ql = q.toLowerCase();
     Store.regular().forEach(c => {
-      const ms = Store.msgs(c); const m = ms.find(x => (x.t || "").toLowerCase().includes(ql));
-      if (!c.title.toLowerCase().includes(ql) && !m) return; n++;
+      const ms = Store.msgs(c); const m = ms.find(x => whoOk(x.u) && (x.t || "").toLowerCase().includes(ql));
+      if (!(who === "all" && c.title.toLowerCase().includes(ql)) && !m) return; n++;
       const card = h("div", { class: "card panel click" });
       card.append(h("div", { class: "big" })); card.lastChild.innerHTML = mark(c.title, q);
       if (m) { const i = m.t.toLowerCase().indexOf(ql), from = Math.max(0, i - 40); const sn = h("div", { class: "muted", style: "margin-top:4px" }); sn.innerHTML = mark((m.u ? "You: " : "claw: ") + (from ? "…" : "") + m.t.slice(from, i + q.length + 90).replace(/\n/g, " "), q); card.append(sn); }
@@ -543,7 +575,7 @@ function ChatPane(root, projectMode) {
   const sendBtn = h("button", { class: "cbtn send", title: "Send", style: "color:var(--on-accent)", onclick: () => self.send() });
   const setBusy = b => { busy = b; sendBtn.innerHTML = b ? `<div class="stopsq"></div>` : ARROW; sendBtn.title = b ? "Stop" : "Send"; };
   setBusy(false);
-  root.append(h("div", { class: "pane" }, head, list, results, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, sendBtn)), picker)));
+  root.append(h("div", { class: "pane" }, head, whoRow, list, results, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, sendBtn)), picker)));
   self.input = input;
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(160, input.scrollHeight) + "px"; });
   input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); self.send(); } });
@@ -577,6 +609,7 @@ function ChatPane(root, projectMode) {
   function markStopped(b, partial) { b.classList.remove("hidden"); b.textContent = partial; b.append(h("span", { class: "stopnote" }, "Not finished · you stopped this reply")); }
 
   self.open = c => {
+    self.conv = c;
     if (searching) closeSearch();
     conv = c; msgs = Store.msgs(c); pending = []; renderPending(); list.innerHTML = "";
     if (!projectMode) P.set("curChat", c.id);
@@ -680,13 +713,25 @@ function ChatPane(root, projectMode) {
 function openSettings() {
   const host = h("input", { class: "field", placeholder: "http://127.0.0.1:11434" }); host.value = S.host;
   const model = h("input", { class: "field", placeholder: "llama3.2:3b" }); model.value = S.model;
-  const prog = h("progress", { max: 100, value: 0, class: "hidden" }), pst = h("div", { class: "muted" }), installed = h("div", { style: "white-space:pre-line;font-size:13px" }, "…");
+  const prog = h("progress", { max: 100, value: 0, class: "hidden" }), pst = h("div", { class: "muted" }), installed = h("div", { class: "mlist-inst" }, "…");
+  const mq = h("input", { class: "field", placeholder: "Search installed models" });
+  let instList = null;
+  const renderInst = () => {
+    installed.innerHTML = "";
+    if (!instList) { installed.append(h("div", { class: "muted" }, "Ollama not reachable")); return; }
+    const q = mq.value.trim().toLowerCase(), l = instList.filter(x => !q || x.name.toLowerCase().includes(q));
+    if (!l.length) installed.append(h("div", { class: "muted" }, instList.length ? `No installed model matches "${mq.value.trim()}".` : "None yet. Download one above."));
+    l.forEach(x => { const on = normName(x.name) === normName(model.value.trim());
+      installed.append(h("div", { class: "inst" + (on ? " on" : ""), title: x.name, onclick: () => { model.value = x.name; P.set("model", x.name); pollStatus(); renderInst(); } },
+        h("span", { class: "grow" }, x.name), h("span", { class: "muted" }, `${(x.size / 1e9).toFixed(1)} GB · ${on ? "In use" : "Use"}`))); });
+  };
+  mq.addEventListener("input", renderInst);
   const ram = SYS ? SYS.memTotal / 1e9 : 0;
   const tip = (ram >= 24 ? `This PC has ${ram.toFixed(0)} GB RAM: it can run 14B models like qwen2.5-coder:14b; 7–8B ones are faster.`
     : ram >= 12 ? `This PC has ${ram.toFixed(0)} GB RAM: 7–8B models like qwen2.5-coder:7b or llama3.1:8b run well.`
     : `Best with 1–3B models like llama3.2:3b or qwen2.5-coder:1.5b.`) + " To show it photos or videos, use a vision model like gemma3:4b or qwen2.5vl:7b.";
   const save = () => { P.set("host", host.value.trim() || "http://127.0.0.1:11434"); P.set("model", model.value.trim() || "llama3.2:3b"); pollStatus(); };
-  const refresh = async () => { try { const m = JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []; installed.textContent = m.map(x => `${x.name}  ·  ${(x.size / 1e9).toFixed(1)} GB`).join("\n") || "None yet"; } catch { installed.textContent = "Ollama not reachable"; } };
+  const refresh = async () => { try { instList = (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).sort((a, b) => a.name.localeCompare(b.name)); } catch { instList = null; } renderInst(); };
   const pull = h("button", { class: "btn-accent", style: "margin:12px 0 4px", onclick: async () => {
     save(); prog.classList.remove("hidden"); pull.disabled = true; const id = uid();
     handlers[id] = {
@@ -695,10 +740,9 @@ function openSettings() {
     };
     invoke("http_stream", { id, url: S.host + "/api/pull", body: JSON.stringify({ name: S.model }), event: "pull-line" });
   } }, "Download model");
-  const body = h("div", {}, lbl("Ollama address"), host, lbl("Model"), model, h("div", { class: "muted", style: "margin-top:8px" }, tip), pull, prog, pst,
+  const body = h("div", {}, lbl("Ollama address"), host, lbl("Model in use"), model, lbl("Installed models · click one to use it"), mq, installed, h("div", { class: "muted", style: "margin-top:8px" }, tip), pull, prog, pst,
     h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama").then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
-    h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"),
-    lbl("Installed models"), installed);
+    h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"));
   modal("Settings", body, [["Done", save, true]]);
   refresh();
 }
@@ -733,6 +777,7 @@ function openLook() {
     else { P.set("glassTint", n); rerender(); }
   }));
   body.append(...slider("Glass tint strength", "glassStrength", 30, 100));
+  body.append(...slider("Glass blur", "glassBlur", 45, 100), ...slider("Glass outline", "glassRim", 30, 100));
   modal("Look", body);
 }
 function pickWallFile(accept, key, wallName) {
@@ -957,11 +1002,12 @@ let chatPane, projPane;
   applyLook();
   $("#btnSettings").onclick = openSettings; $("#btnLook").onclick = openLook; $("#btnModels").onclick = openModels;
   chatPane = ChatPane($("#chat"), false);
-  projPane = ChatPane($("#projChat"), true);
+  projPane = ChatPane($("#projChatPane"), true);
   const last = Store.convs.find(c => c.id === P.get("curChat", "") && !c.project);
   chatPane.open(last || Store.newConv(null));
   const cp = Store.project(P.get("curProject", null));
   if (cp) showProjectDetail(cp); else showProjectList();
+  applyWide();
   go(tab, false);
   renderHome();
   if (PATHS.clawFound === false) chatPane.input.placeholder = "claw binary missing from this install";

@@ -30,13 +30,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXTRA: ${{ inputs.notes }}
         run: |
-          # Version goes up by one patch every release: start from the app version, skip any already released.
-          ver=$(jq -r .version desktop/package.json)
-          last=$(git tag -l 'claww-v*' | sed 's/^claww-v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
-          if [ -n "$last" ] && [ "$(printf '%s\n%s\n' "$last" "$ver" | sort -V | tail -1)" = "$last" ]; then
-            IFS=. read -r a b c <<< "$last"; ver="$a.$b.$((c+1))"
-          fi
-          tag="claww-v${ver}"
+          # Release version = the original ultraworkers/claw-code's latest version (v0.1.9 now, then v0.2.0 …).
+          up_tag=$(gh api repos/ultraworkers/claw-code/releases/latest --jq .tag_name 2>/dev/null || true)
+          [ -z "$up_tag" ] && up_tag=$(git ls-remote --tags --refs https://github.com/ultraworkers/claw-code.git | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          ver="${up_tag#v}"; [ -z "$ver" ] && ver=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//')
+          # Several Claww builds on the same claw-code version get -2, -3 … tags; the title keeps the clean version.
+          tag="claww-v${ver}"; n=1
+          while gh release view "$tag" >/dev/null 2>&1 || git rev-parse -q --verify "refs/tags/$tag" >/dev/null; do n=$((n+1)); tag="claww-v${ver}-${n}"; done
           up=$(git log -1 --format='%h %s' --first-parent origin/main 2>/dev/null || true)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           {

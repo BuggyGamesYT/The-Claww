@@ -92,6 +92,14 @@ class MainActivity : Activity() {
     private lateinit var prefs: android.content.SharedPreferences
     private lateinit var pager: Pager
     private val tabViews = mutableListOf<TextView>()
+    /** Tablet in landscape: Home sits beside Chat (no Home tab) and project chats get a project sidebar. Phones never use this. */
+    private var wide = false
+    private fun pageOf(tab: Int) = if (wide) maxOf(0, tab - 1) else tab
+    private fun tabOf(page: Int) = if (wide) page + 1 else page
+    private fun goTab(tab: Int, animate: Boolean = true) = pager.go(pageOf(tab), animate)
+    private val curTab get() = tabOf(pager.index)
+    private lateinit var projSide: LinearLayout
+    private lateinit var projSideWrap: View
     private lateinit var chatPane: ChatPane
     private lateinit var projPane: ChatPane
     private lateinit var projFrame: FrameLayout
@@ -123,14 +131,17 @@ class MainActivity : Activity() {
         window.statusBarColor = bg
         window.navigationBarColor = bg
 
-        // Top bar: settings (with status dot) · Home | Chat | Projects · look
+        val cfg = resources.configuration
+        wide = cfg.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE && cfg.smallestScreenWidthDp >= 600
+        // Top bar: settings · Home | Chat | Projects · look (tablet landscape: Chat | Projects, Home is merged into Chat)
         val tabs = LinearLayout(this).apply {
             background = panel(24); setPadding(dp(4), dp(4), dp(4), dp(4))
             listOf("Home", "Chat", "Projects").forEachIndexed { i, name ->
+                if (wide && i == 0) return@forEachIndexed
                 val tv = TextView(this@MainActivity).apply {
-                    text = name; textSize = 15f; gravity = Gravity.CENTER
+                    text = name; textSize = 15f; gravity = Gravity.CENTER; tag = i
                     setPadding(dp(16), dp(8), dp(16), dp(8))
-                    setOnClickListener { pager.go(i) }
+                    setOnClickListener { goTab(i) }
                 }
                 tabViews.add(tv); addView(tv)
             }
@@ -156,11 +167,18 @@ class MainActivity : Activity() {
 
         // Pages: Home (left) · Chat (middle) · Projects (right)
         pager = Pager(this)
-        pager.addPage(buildHome())
         chatPane = ChatPane(null)
-        pager.addPage(chatPane.root)
+        if (wide) {
+            pager.addPage(LinearLayout(this).apply {
+                addView(buildHome(), LinearLayout.LayoutParams(0, MATCH_PARENT, 0.36f))
+                addView(chatPane.root, LinearLayout.LayoutParams(0, MATCH_PARENT, 0.64f))
+            })
+        } else {
+            pager.addPage(buildHome())
+            pager.addPage(chatPane.root)
+        }
         pager.addPage(buildProjects())
-        pager.onChange = { i -> styleTabs(i); hideKeyboard(); if (i == 0) refreshHome(); if (i == 2 && openProject == null) showProjectList() }
+        pager.onChange = { p -> val i = tabOf(p); styleTabs(i); hideKeyboard(); if (i <= 1) refreshHome(); if (i == 2 && openProject == null) showProjectList() }
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -176,8 +194,8 @@ class MainActivity : Activity() {
         // Restore last regular chat and the tab the user was on.
         val last = Store.convs.firstOrNull { it.id == prefs.getString("curChat", "") && it.project == null }
         chatPane.open(last ?: Store.newConv(null))
-        val startTab = prefs.getInt("tab", 1)
-        pager.go(startTab, false); styleTabs(startTab)
+        val startTab = prefs.getInt("tab", 1).let { if (wide && it == 0) 1 else it }
+        goTab(startTab, false); styleTabs(startTab)
         prefs.getString("curProject", null)?.let { pid -> Store.project(pid)?.let { showProjectDetail(it) } }
 
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
@@ -208,7 +226,7 @@ class MainActivity : Activity() {
 
     private fun styleTabs(sel: Int) {
         prefs.edit().putInt("tab", sel).apply()
-        tabViews.forEachIndexed { i, tv ->
+        tabViews.forEach { tv -> val i = tv.tag as Int
             tv.background = if (i == sel) round(fg, 20) else null
             tv.setTextColor(if (i == sel) bg else muted)
             tv.typeface = if (i == sel) Typeface.create("sans-serif-medium", Typeface.NORMAL) else Typeface.DEFAULT
@@ -238,10 +256,11 @@ class MainActivity : Activity() {
     /** Liquid glass: translucent tint, a soft top sheen and a bright hairline rim. */
     private fun glass(r: Int, tint: Int, strength: Int = prefs.getInt("glassStrength", 30)): android.graphics.drawable.Drawable {
         val rad = dp(r).toFloat()
-        if (liquidOn && Build.VERSION.SDK_INT >= 33) return LiquidGlass(rad, tint, strength / 100f * 0.5f, resources.displayMetrics.density)
+        if (liquidOn && Build.VERSION.SDK_INT >= 33) return LiquidGlass(rad, tint, strength / 100f * 0.5f, resources.displayMetrics.density,
+            prefs.getInt("glassBlur", 45) / 100f, prefs.getInt("glassRim", 30) / 100f)
         val fill = GradientDrawable().apply { setColor(withAlpha(tint, 20 + strength * 2)); cornerRadius = rad }
         val sheen = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(withAlpha(Color.WHITE, 60), withAlpha(Color.WHITE, 8), withAlpha(Color.WHITE, 0))).apply { cornerRadius = rad }
-        val rim = GradientDrawable().apply { setColor(Color.TRANSPARENT); cornerRadius = rad; setStroke(dp(1), withAlpha(Color.WHITE, 90)) }
+        val rim = GradientDrawable().apply { setColor(Color.TRANSPARENT); cornerRadius = rad; setStroke(dp(1), withAlpha(Color.WHITE, 20 + prefs.getInt("glassRim", 30) * 160 / 100)) }
         return android.graphics.drawable.LayerDrawable(arrayOf(fill, sheen, rim))
     }
 
@@ -403,16 +422,16 @@ class MainActivity : Activity() {
                 if (Store.projects.isEmpty()) c.addView(text("No projects yet. Tap to create one.", 14f, muted))
                 Store.projects.sortedByDescending { it.updated }.take(4).forEach { p ->
                     c.addView(text("${p.name}  ·  ${Store.projectChats(p.id).size} chats", 15f, fg).apply {
-                        setPadding(0, dp(6), 0, dp(6)); setOnClickListener { showProjectDetail(p); pager.go(2) }
+                        setPadding(0, dp(6), 0, dp(6)); setOnClickListener { showProjectDetail(p); goTab(2) }
                     })
                 }
-                c.setOnClickListener { pager.go(2) }
+                c.setOnClickListener { goTab(2) }
             }
             "prompt" -> {
                 header("Quick prompt")
                 c.addView(text(w.optString("text"), 16f, fg))
                 c.addView(text("Tap to ask in Chat", 12f, accent).apply { setPadding(0, dp(8), 0, 0) })
-                c.setOnClickListener { pager.go(1); chatPane.input.setText(w.optString("text")); chatPane.onSend() }
+                c.setOnClickListener { goTab(1); chatPane.input.setText(w.optString("text")); chatPane.onSend() }
             }
             "note" -> {
                 header("Note")
@@ -435,7 +454,13 @@ class MainActivity : Activity() {
         projFrame = FrameLayout(this)
         projFrame.addView(ScrollView(this).apply { addView(projList); isFillViewport = true }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         projFrame.addView(ScrollView(this).apply { addView(projDetail); isFillViewport = true }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        projFrame.addView(projPane.root, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        // Project chat layer: on tablets in landscape a Hark-style sidebar lists every project (and the open one's chats).
+        projSide = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(8), dp(24)) }
+        projSideWrap = ScrollView(this).apply { addView(projSide); isFillViewport = true; visibility = if (wide) View.VISIBLE else View.GONE }
+        projFrame.addView(LinearLayout(this).apply {
+            addView(projSideWrap, LinearLayout.LayoutParams(0, MATCH_PARENT, 0.28f))
+            addView(projPane.root, LinearLayout.LayoutParams(0, MATCH_PARENT, if (wide) 0.72f else 1f))
+        }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         showProjectList()
         return projFrame
     }
@@ -533,19 +558,46 @@ class MainActivity : Activity() {
         val p = Store.project(cv.project) ?: return
         openProject = p
         projPane.open(cv); showLayer(2)
+        if (wide) renderProjSide()
+    }
+
+    private fun renderProjSide() {
+        projSide.removeAllViews()
+        projSide.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(6), 0, 0, dp(14))
+            addView(text("Projects", 13f, muted, true).apply { letterSpacing = 0.06f }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            addView(chip("+") { newProjectDialog { p -> openProjectChat(Store.projectChats(p.id).firstOrNull() ?: Store.newConv(p.id)) } })
+        })
+        Store.projects.sortedByDescending { it.updated }.forEach { p ->
+            val on = p.id == openProject?.id
+            projSide.addView(text(p.name, 18f, if (on) fg else muted, on).apply {
+                setPadding(dp(10), dp(10), dp(10), dp(10)); maxLines = 2
+                if (on) background = round(withAlpha(fg, 22), 14)
+                setOnClickListener { openProjectChat(Store.projectChats(p.id).firstOrNull() ?: Store.newConv(p.id)) }
+                setOnLongClickListener { showProjectDetail(p); true }
+            }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(2) })
+            if (on) Store.projectChats(p.id).forEach { cv ->
+                val cur = cv.id == projPane.conv.id
+                projSide.addView(text(cv.title, 14f, if (cur) fg else muted).apply {
+                    setPadding(dp(26), dp(7), dp(10), dp(7)); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+                    if (cur) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                    setOnClickListener { openProjectChat(cv) }
+                })
+            }
+        }
     }
 
     private fun openConv(cv: Conv) {
-        if (cv.project == null) { chatPane.open(cv); pager.go(1) }
-        else { Store.project(cv.project)?.let { showProjectDetail(it) }; openProjectChat(cv); pager.go(2) }
+        if (cv.project == null) { chatPane.open(cv); goTab(1) }
+        else { Store.project(cv.project)?.let { showProjectDetail(it) }; openProjectChat(cv); goTab(2) }
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         when {
-            pager.index == 2 && projPane.root.visibility == View.VISIBLE -> openProject?.let { showProjectDetail(it) } ?: showProjectList()
-            pager.index == 2 && openProject != null -> showProjectList()
-            pager.index != 1 -> pager.go(1)
+            curTab == 2 && projFrame.getChildAt(2).visibility == View.VISIBLE -> openProject?.let { showProjectDetail(it) } ?: showProjectList()
+            curTab == 2 && openProject != null -> showProjectList()
+            curTab != 1 -> goTab(1)
             else -> super.onBackPressed()
         }
     }
@@ -585,6 +637,21 @@ class MainActivity : Activity() {
         private val saved = HashMap<TextView, CharSequence>()
         private var hits = listOf<Int>(); private var hitIdx = 0
         private var searching = false
+        /** Which messages search looks in: "all" (both), "me" (only mine), "ai" (only claw's). */
+        private var searchWho = prefs.getString("searchWho", "all") ?: "all"
+        private val whoRow = LinearLayout(this@MainActivity).apply { setPadding(dp(14), 0, dp(14), dp(6)); visibility = View.GONE }
+        private fun whoOk(user: Boolean) = searchWho == "all" || (searchWho == "me") == user
+        private fun renderWho() {
+            whoRow.removeAllViews()
+            listOf("all" to "Both", "me" to "Only mine", "ai" to "Only AI").forEach { (k, l) ->
+                val on = k == searchWho
+                whoRow.addView(TextView(this@MainActivity).apply {
+                    text = l; textSize = 13f; setTextColor(if (on) t.onAccent else fg)
+                    background = round(if (on) accent else surface2, 16); setPadding(dp(12), dp(6), dp(12), dp(6))
+                    setOnClickListener { searchWho = k; prefs.edit().putString("searchWho", k).apply(); renderWho(); runSearch(searchField.text.toString().trim()) }
+                }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { rightMargin = dp(8) })
+            }
+        }
         init {
             // Sub-header: back (projects) · title + status · history / new
             val head = LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(2), dp(12), dp(6)) }
@@ -651,6 +718,7 @@ class MainActivity : Activity() {
                 addView(composer, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             }
             root.addView(head, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            renderWho(); root.addView(whoRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             root.addView(resultsScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             root.addView(wrap, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -694,7 +762,7 @@ class MainActivity : Activity() {
             val head = searchBox.parent as LinearLayout
             val full = head.width - head.paddingLeft - head.paddingRight - (head.getChildAt(0).takeIf { mode != null }?.width ?: 0)
             headMain?.visibility = View.GONE; headExtras.forEach { it.visibility = View.GONE }
-            searchBox.visibility = View.VISIBLE; searchBox.alpha = 0.4f
+            searchBox.visibility = View.VISIBLE; searchBox.alpha = 0.4f; whoRow.visibility = View.VISIBLE
             android.animation.ValueAnimator.ofInt(dp(36), full).apply {
                 duration = 260; interpolator = android.view.animation.DecelerateInterpolator(1.8f)
                 addUpdateListener { searchBox.layoutParams = searchBox.layoutParams.apply { width = it.animatedValue as Int }; searchBox.alpha = 0.4f + 0.6f * it.animatedFraction; searchBox.requestLayout() }
@@ -707,7 +775,7 @@ class MainActivity : Activity() {
             if (!searching) return
             searching = false
             searchField.setText(""); hideKeyboard(); clearHighlights()
-            resultsScroll.visibility = View.GONE; scroll.visibility = View.VISIBLE
+            resultsScroll.visibility = View.GONE; scroll.visibility = View.VISIBLE; whoRow.visibility = View.GONE
             android.animation.ValueAnimator.ofInt(searchBox.width, dp(36)).apply {
                 duration = 200; interpolator = android.view.animation.AccelerateInterpolator()
                 addUpdateListener { searchBox.layoutParams = searchBox.layoutParams.apply { width = it.animatedValue as Int }; searchBox.alpha = 1f - 0.6f * it.animatedFraction; searchBox.requestLayout() }
@@ -728,8 +796,8 @@ class MainActivity : Activity() {
             var n = 0
             Store.regularChats().forEach { c ->
                 val msgs = Store.msgs(c)
-                val inTitle = c.title.contains(q, true)
-                val m = msgs.firstOrNull { it.text.contains(q, true) }
+                val inTitle = searchWho == "all" && c.title.contains(q, true)
+                val m = msgs.firstOrNull { whoOk(it.user) && it.text.contains(q, true) }
                 if (!inTitle && m == null) return@forEach
                 n++
                 val card = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; background = panel(18); setPadding(dp(14), dp(12), dp(14), dp(12)) }
@@ -765,7 +833,7 @@ class MainActivity : Activity() {
         private fun findInChat(q: String, flash: Boolean = false) {
             clearHighlights()
             if (q.isEmpty()) { searchCount.text = ""; return }
-            hits = bubbleViews.indices.filter { bubbleViews[it].text.toString().contains(q, true) }
+            hits = bubbleViews.indices.filter { whoOk(bubbleViews[it].tag == true) && bubbleViews[it].text.toString().contains(q, true) }
             hits.forEach { i -> val tv = bubbleViews[i]; saved[tv] = tv.text; tv.text = highlight(tv.text.toString(), q) }
             hitIdx = hits.size - 1
             searchCount.text = if (hits.isEmpty()) "0  " else "${hitIdx + 1}/${hits.size}  "
@@ -849,7 +917,7 @@ class MainActivity : Activity() {
                 if (s.isEmpty()) visibility = View.GONE
             }
             col.addView(tv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-            bubbleViews += tv
+            tv.tag = user; bubbleViews += tv
             chat.addView(LinearLayout(this@MainActivity).apply {
                 gravity = if (user) Gravity.END else Gravity.START
                 setPadding(0, dp(5), 0, dp(5)); addView(col)
@@ -1222,13 +1290,42 @@ class MainActivity : Activity() {
         val modelF = field(model, "llama3.2:1b")
         val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; visibility = View.GONE }
         val pullStatus = TextView(this).apply { setTextColor(muted); textSize = 12f }
-        val models = TextView(this).apply { setTextColor(fg); textSize = 13f }
+        // Installed models: tap one to use it (no typing), with a filter for long lists.
+        val modelSearch = field("", "Search installed models")
+        val modelList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var allModels: List<String>? = null
+        fun renderModels() {
+            modelList.removeAllViews()
+            val l = allModels
+            if (l == null) { modelList.addView(TextView(this).apply { text = "Ollama not reachable yet"; setTextColor(muted); textSize = 13f }); return }
+            val q = modelSearch.text.toString().trim()
+            val shown = l.filter { q.isEmpty() || it.contains(q, true) }
+            if (shown.isEmpty()) modelList.addView(TextView(this).apply { text = if (l.isEmpty()) "None yet. Download one below." else "No installed model matches \"$q\"."; setTextColor(muted); textSize = 13f })
+            shown.forEach { name ->
+                val on = norm(name) == norm(modelF.text.toString().trim())
+                modelList.addView(LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL; background = round(if (on) withAlpha(accent, 70) else surface2, 12); setPadding(dp(14), dp(10), dp(12), dp(10))
+                    addView(TextView(this@MainActivity).apply { text = name; setTextColor(fg); textSize = 14f; maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                    addView(TextView(this@MainActivity).apply { text = if (on) "In use" else "Use"; setTextColor(if (on) accent else muted); textSize = 13f; setPadding(dp(10), 0, 0, 0) })
+                    setOnClickListener {
+                        modelF.setText(name); prefs.edit().putString("model", name).apply()
+                        hideKeyboard(); renderModels(); pollStatus()
+                    }
+                }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(6) })
+            }
+        }
+        modelSearch.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(e: android.text.Editable?) { renderModels() }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
         val pull = Button(this).apply {
             text = "Download model"; setTextColor(t.onAccent); background = round(accent, 12); isAllCaps = false
         }
         box.addView(sw)
         box.addView(label("Remote Ollama host (when not on this device)")); box.addView(hostF)
-        box.addView(label("Model")); box.addView(modelF)
+        box.addView(label("Model in use")); box.addView(modelF)
+        box.addView(label("Installed models · tap one to use it")); box.addView(modelSearch, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(8) }); box.addView(modelList)
         val ramGb = (android.app.ActivityManager.MemoryInfo().also { (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).getMemoryInfo(it) }.totalMem / 1_000_000_000.0)
         val tip = (if (ramGb >= 12) "This device has ${"%.0f".format(ramGb)} GB RAM: it can run 7–8B models like qwen2.5-coder:7b or llama3.1:8b. Small ones (llama3.2:3b) are faster."
                   else "This device has ${"%.0f".format(ramGb)} GB RAM: best with 1–3B models like llama3.2:3b, qwen2.5-coder:1.5b, gemma3:1b.") +
@@ -1240,19 +1337,17 @@ class MainActivity : Activity() {
             setOnClickListener { settingsDialog?.dismiss(); openModels() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)).apply { topMargin = dp(8) })
         box.addView(progress); box.addView(pullStatus)
-        box.addView(label("Installed models")); box.addView(models)
         fun save() {
             prefs.edit().putBoolean("builtin", sw.isChecked).putString("host", hostF.text.toString().trim())
                 .putString("model", modelF.text.toString().trim()).apply()
             if (builtIn) startOllama()
         }
         fun refreshModels() = thread {
-            val s = try {
-                val j = JSONObject(URL("$host/api/tags").readText())
-                val a = j.getJSONArray("models")
-                (0 until a.length()).joinToString("\n") { a.getJSONObject(it).getString("name") }.ifEmpty { "None yet" }
-            } catch (e: Exception) { "Ollama not reachable yet" }
-            runOnUiThread { models.text = s }
+            val l = try {
+                val a = JSONObject(URL("$host/api/tags").readText()).getJSONArray("models")
+                (0 until a.length()).map { a.getJSONObject(it).getString("name") }.sorted()
+            } catch (e: Exception) { null }
+            runOnUiThread { allModels = l; renderModels() }
         }
         pull.setOnClickListener {
             save(); progress.visibility = View.VISIBLE; pull.isEnabled = false
@@ -1280,9 +1375,13 @@ class MainActivity : Activity() {
         }
         refreshModels()
         settingsDialog = AlertDialog.Builder(this, dialogStyle)
-            .setTitle("Settings").setView(ScrollView(this).apply { addView(box) })
+            .setTitle("Settings").setView(ScrollView(this).apply { addView(box); isFillViewport = true })
             .setPositiveButton("Done") { _, _ -> save() }
-            .show()
+            .create().apply {
+                // Keep fields visible above the keyboard: the dialog shrinks and scrolls instead of being covered.
+                window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                show()
+            }
     }
 
 
@@ -1661,6 +1760,8 @@ class MainActivity : Activity() {
             dialog?.dismiss(); prefs.edit().putString("glassStyle", name).putBoolean("glass", true).apply(); recreate()
         })
         if (!LiquidGlass.supported) box.addView(TextView(this).apply { text = "Liquid refraction needs Android 13+; Frosted is used here."; setTextColor(muted); textSize = 11f })
+        slider("Glass blur", "glassBlur", 45, 100)
+        slider("Glass outline", "glassRim", 30, 100)
         box.addView(label("Glass tint"))
         box.addView(swatchRow(glassTints.map { (name, c) ->
             name to GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(withAlpha(c, 230), withAlpha(c, 90)))
