@@ -520,8 +520,10 @@ async function videoFramesB64(src, n = 4, max = 768) {
 // falls back to a still frame plus "Open in video player", and a playable H.264 copy when ffmpeg is installed.
 const IS_LINUX = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 // A URL the web view can play the file from (a blob on Linux: revoke it with dropSrc when done).
-function videoSrc(path, mime) {
-  return IS_LINUX ? blobUrl({ path, mime: mime || mimeOf(path) }) : Promise.resolve(fileSrc(path));
+// `viaBlob` forces a blob: used when the asset:// URL fails, so a file-access problem (scope, MIME) can't leave a black box.
+const vidMime = (path, mime) => (mime || "").startsWith("video/") ? mime : (mimeOf(path).startsWith("video/") ? mimeOf(path) : "video/mp4");
+function videoSrc(path, mime, viaBlob) {
+  return IS_LINUX || viaBlob ? blobUrl({ path, mime: vidMime(path, mime) }) : Promise.resolve(fileSrc(path));
 }
 const dropSrc = v => { const u = v.getAttribute("src") || ""; v.pause(); v.removeAttribute("src"); v.load(); if (u.startsWith("blob:")) URL.revokeObjectURL(u.split("#")[0]); };
 let ffmpegOk = null;
@@ -542,8 +544,8 @@ function videoPoster(a) {
   if (!posters.has(a.path)) posters.set(a.path, (async () => {
     // Linux: a still from ffmpeg (when installed) is cheaper than loading the whole file into the page.
     if (IS_LINUX && await hasFfmpeg()) try { return fileSrc(await invoke("video_poster", { path: a.path })); } catch {}
-    try {
-      const v = h("video", { preload: "auto", playsinline: "" }); v.muted = true; v.src = (await videoSrc(a.path, a.mime)) + "#t=0.5";
+    for (const viaBlob of IS_LINUX ? [false] : [false, true]) try {
+      const v = h("video", { preload: "auto", playsinline: "" }); v.muted = true; v.src = (await videoSrc(a.path, a.mime, viaBlob)) + "#t=0.5";
       if (await videoDecodes(v)) {
         const k = Math.min(1, 320 / Math.max(v.videoWidth, v.videoHeight)), c = h("canvas"); c.width = v.videoWidth * k; c.height = v.videoHeight * k;
         c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
@@ -597,13 +599,20 @@ function openVideo(a) {
       } catch (e) { note.textContent = `This video can't play inside The Claww, and a playable copy couldn't be made (${e}). Try opening it in your video player.`; return; }
     }
     note.textContent = "This video's format can't play inside The Claww. Open it in your video player instead." +
-      (IS_LINUX ? " To play more formats here, install: sudo pacman -S gst-libav gst-plugins-bad (or install ffmpeg for automatic copies)." : " Installing ffmpeg lets The Claww make a playable copy automatically.");
+      (IS_LINUX ? " Videos play here through GStreamer: install its codecs with  sudo pacman -S gst-libav  (Arch) or  sudo apt install gstreamer1.0-libav  (Debian/Ubuntu), then reopen the app. Installing ffmpeg also lets The Claww make playable copies." : " Installing ffmpeg lets The Claww make a playable copy automatically.");
   };
-  videoSrc(a.path, a.mime).then(async u => {
-    if (!box.isConnected) { if (u.startsWith("blob:")) URL.revokeObjectURL(u); return; }
-    v.src = u;
-    if (!(await videoDecodes(v))) cantPlay();
-  }).catch(() => cantPlay());
+  (async () => {
+    // Windows/macOS: the asset:// URL first, then the same bytes as a blob (rules out file-access trouble), then the fallback.
+    for (const viaBlob of IS_LINUX ? [false] : [false, true]) {
+      let u; try { u = await videoSrc(a.path, a.mime, viaBlob); } catch { continue; }
+      if (!box.isConnected) { if (u.startsWith("blob:")) URL.revokeObjectURL(u); return; }
+      v.src = u;
+      if (await videoDecodes(v)) return;
+      if (u.startsWith("blob:")) { URL.revokeObjectURL(u); }
+      v.removeAttribute("src"); v.load();
+    }
+    if (box.isConnected) cantPlay();
+  })();
 }
 
 // ---------- chat pane ----------

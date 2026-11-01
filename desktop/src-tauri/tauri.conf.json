@@ -25,7 +25,12 @@
         "enable": true,
         "scope": {
           "allow": [
-            "**"
+            "**",
+            "$APPDATA/**",
+            "$APPLOCALDATA/**",
+            "$APPCACHE/**",
+            "$HOME/**",
+            "$TEMP/**"
           ],
           "requireLiteralLeadingDot": false
         }
@@ -50,7 +55,10 @@
     "shortDescription": "Local AI agent with Ollama",
     "linux": {
       "deb": {
-        "depends": []
+        "depends": [
+          "gstreamer1.0-libav",
+          "gstreamer1.0-plugins-good"
+        ]
       }
     }
   }
