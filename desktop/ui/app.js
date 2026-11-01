@@ -204,6 +204,11 @@ function slider(label, key, def, max, onChange) {
   r.addEventListener("input", () => { P.set(key, +r.value); onChange ? onChange() : applyLook(); });
   return [lbl(label), r];
 }
+function toggle(label, key, def, onChange) {
+  const c = h("input", { type: "checkbox" }); c.checked = P.get(key, def);
+  c.onchange = () => { P.set(key, c.checked); onChange && onChange(c.checked); };
+  return h("label", { class: "switch" }, label, c);
+}
 function swatches(items, selected, pick) { // items: [name, cssBackground]
   return h("div", { class: "swatches" }, items.map(([n, bg]) =>
     h("div", { class: "sw" + (n === selected ? " on" : ""), onclick: () => pick(n) }, h("div", { style: `background:${bg}` }), n)));
@@ -502,6 +507,40 @@ listen("chat-line-done", p => handlers[p.id]?.done(p));
 listen("pull-line", p => handlers[p.id]?.out(p.line));
 listen("pull-line-done", p => handlers[p.id]?.done(p));
 
+
+// ---------- model advisor: right model for the task ----------
+const Advisor = {
+  LABEL: { code: "coding", vision: "photos and video", reason: "math and reasoning", write: "writing", chat: "general chat" },
+  CAT: {"code": [["qwen2.5-coder:32b", 20, 24], ["qwen2.5-coder:14b", 9, 12], ["qwen2.5-coder:7b", 4.7, 6.5], ["qwen2.5-coder:3b", 1.9, 3.5], ["qwen2.5-coder:1.5b", 1, 2.2], ["qwen2.5-coder:0.5b", 0.4, 1.2]], "vision": [["qwen2.5vl:32b", 21, 26], ["gemma3:27b", 17, 22], ["gemma3:12b", 8.1, 11], ["qwen2.5vl:7b", 6, 8], ["gemma3:4b", 3.3, 5], ["qwen2.5vl:3b", 3.2, 4.5], ["moondream", 1.7, 2.5]], "reason": [["qwen3:32b", 20, 24], ["deepseek-r1:14b", 9, 12], ["qwen3:14b", 9.3, 12], ["qwen3:8b", 5.2, 7], ["deepseek-r1:8b", 5.2, 7], ["qwen3:4b", 2.6, 4], ["qwen3:1.7b", 1.4, 2.2], ["deepseek-r1:1.5b", 1.1, 2]], "write": [["gemma3:27b", 17, 22], ["gemma3:12b", 8.1, 11], ["llama3.1:8b", 4.9, 7], ["gemma3:4b", 3.3, 5], ["llama3.2:3b", 2, 3.5], ["gemma3:1b", 0.8, 1.5]], "chat": [["qwen3:14b", 9.3, 12], ["gemma3:12b", 8.1, 11], ["qwen3:8b", 5.2, 7], ["llama3.1:8b", 4.9, 7], ["gemma3:4b", 3.3, 5], ["qwen3:4b", 2.6, 4], ["llama3.2:3b", 2, 3.5], ["llama3.2:1b", 1.3, 2], ["gemma3:1b", 0.8, 1.5]]},
+  vision: /^(gemma3:(?!1b)|qwen2\.5vl|qwen3-vl|llava|bakllava|moondream|llama3\.2-vision|minicpm-v|granite3\.2-vision|mistral-small3\.[12])/,
+  task(msg, hasVisual, names) {
+    if (hasVisual) return "vision";
+    const m = msg.toLowerCase();
+    if (names.some(n => /\.(kt|java|rs|py|js|ts|c|cpp|h|go|sh|html|css|sql|json|xml|ya?ml|toml|ps1|bat)$/i.test(n)) || m.includes("```") ||
+      /\b(code|coding|function|bug|debug|stack ?trace|compile|compiler|python|kotlin|java|rust|javascript|typescript|c\+\+|golang|sql|regex|api|script|bash|shell|html|css|refactor|unit test|git|gradle|npm|cargo|class|method|variable|exception|segfault|syntax)\b/.test(m)) return "code";
+    if (/\b(math|solve|calculate|compute|prove|proof|equation|algebra|calculus|integral|derivative|probability|statistics|logic|puzzle|riddle|step by step|reason|how many|percent)\b/.test(m) || /\d+\s*[-+*/^×÷]\s*\d+/.test(m)) return "reason";
+    if (/\b(write|rewrite|essay|story|poem|lyrics|email|letter|cover letter|blog|article|summari[sz]e|summary|translate|paraphrase|proofread|caption|speech)\b/.test(m)) return "write";
+    return "chat";
+  },
+  advise(task, installed, current, ramGb, share) {
+    const fits = (this.CAT[task] || this.CAT.chat).filter(e => e[2] <= ramGb * share).map(([name, gb, ram]) => ({ name, gb, ram }));
+    const inst = new Set(installed.map(normName));
+    const rank = n => { const i = fits.findIndex(e => normName(e.name) === normName(n)); return i < 0 ? Infinity : i; };
+    let cur = rank(current);
+    const curVisionOk = task !== "vision" || this.vision.test(normName(current));
+    if (task === "vision" && curVisionOk && cur === Infinity) cur = fits.length;
+    const bestInst = fits.find(e => inst.has(normName(e.name)));
+    const instRank = bestInst ? rank(bestInst.name) : Infinity;
+    let switchTo = null;
+    if (bestInst && normName(bestInst.name) !== normName(current) && (instRank < cur || !curVisionOk)) switchTo = bestInst.name;
+    else if (task === "vision" && !curVisionOk) switchTo = installed.find(n => this.vision.test(normName(n))) || null;
+    const best = fits[0];
+    const suggest = best && !inst.has(normName(best.name)) && rank(best.name) < Math.min(cur, instRank) ? best : null;
+    return { task, switchTo, suggest };
+  },
+};
+async function installedModels() { try { return (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).map(m => m.name); } catch { return null; } }
+
 function ChatPane(root, projectMode) {
   const self = {};
   let conv = null, msgs = [], pending = [], busy = false, job = null, stopped = false;
@@ -654,12 +693,19 @@ function ChatPane(root, projectMode) {
     const am = { u: false, t: "" }; msgs.push(am);
     setBusy(true); stopped = false;
     let acc = "";
+    // Right model for the task: auto-switch to a better installed one (if enabled), suggest a better download.
+    const visualPre = atts.some(a => a.mime.startsWith("image/") || a.mime.startsWith("video/"));
+    let runModel = S.model, adv = null;
+    const inst = await installedModels();
+    if (inst) adv = Advisor.advise(Advisor.task(text, visualPre, atts.map(a => a.name)), inst, S.model, SYS ? SYS.memTotal / 1e9 : 8, 0.75);
+    if (adv && adv.switchTo && P.get("autoSwitch", false)) { runModel = adv.switchTo; out.parentNode.insertBefore(h("div", { class: "muted", style: "font-size:12px;margin:0 0 4px 6px" }, `Using ${runModel} for ${Advisor.LABEL[adv.task]}`), out); }
     const show = () => { out.textContent = acc.trim() || "…"; list.scrollTop = list.scrollHeight; };
     const finish = () => {
       delete handlers[job]; job = null;
       am.t = acc.trim(); am.s = stopped; Store.saveConv(conv, msgs);
       if (stopped) markStopped(out, am.t);
       setBusy(false);
+      if (adv && adv.suggest && !stopped) suggestCard(out, adv);
     };
     const visual = atts.filter(a => a.mime.startsWith("image/") || a.mime.startsWith("video/"));
     job = uid();
@@ -681,14 +727,14 @@ function ChatPane(root, projectMode) {
           out: line => {
             try {
               const j = JSON.parse(line);
-              if (j.error) acc += /image|vision|multimodal/i.test(j.error) ? `${S.model} can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:7b or llava, then try again.\n(${j.error})` : `Ollama error: ${j.error}`;
+              if (j.error) acc += /image|vision|multimodal/i.test(j.error) ? `${runModel} can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:7b or llava, then try again.\n(${j.error})` : `Ollama error: ${j.error}`;
               else acc += j.message?.content || "";
               show();
             } catch {}
           },
           done: p => { if (p.error && !stopped && !acc) { acc = `Couldn't reach Ollama: ${p.error}`; show(); } finish(); },
         };
-        await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: S.model, stream: true, messages }), event: "chat-line" });
+        await invoke("http_stream", { id: job, url: S.host + "/api/chat", body: JSON.stringify({ model: runModel, stream: true, messages }), event: "chat-line" });
       } else {
         let files = "";
         for (const a of atts) {
@@ -699,13 +745,28 @@ function ChatPane(root, projectMode) {
         const prompt = preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
         handlers[job] = {
           out: chunk => { acc += chunk.replace(ansi, ""); show(); },
-          done: p => { if (!stopped && p.code !== 0 && !acc.trim()) { acc = `claw stopped (code ${p.code}). Is Ollama running and ${S.model} downloaded?`; show(); } finish(); },
+          done: p => { if (!stopped && p.code !== 0 && !acc.trim()) { acc = `claw stopped (code ${p.code}). Is Ollama running and ${runModel} downloaded?`; show(); } finish(); },
         };
         await invoke("ensure_dir", { path: workDir() });
-        await invoke("claw_run", { id: job, prompt, model: S.model, host: S.host, cwd: workDir() });
+        await invoke("claw_run", { id: job, prompt, model: runModel, host: S.host, cwd: workDir() });
       }
     } catch (e) { acc = "Error: " + e; show(); finish(); }
   };
+  function suggestCard(out, adv) {
+    const e = adv.suggest;
+    if (!P.get("suggestModels", true) || P.get("noSuggest", []).includes(e.name) || Date.now() < P.get("snooze:" + e.name, 0)) return;
+    const what = Advisor.LABEL[adv.task];
+    const card = h("div", { class: "suggest panel" },
+      h("div", { style: "font-weight:600" }, `Better model for ${what}: ${e.name}`),
+      h("div", { class: "muted", style: "font-size:12.5px;margin:4px 0 8px" }, `${e.gb.toFixed(1)} GB download, runs on this PC.` +
+        (adv.switchTo && !P.get("autoSwitch", false) ? ` You already have ${adv.switchTo}, which is good for this. Turn on Auto-switch in Settings to use it automatically.` : "")));
+    const gone = () => card.remove();
+    card.append(h("div", { class: "row", style: "gap:8px" },
+      h("button", { class: "chip", onclick: () => { DL.enqueue([e.name]); gone(); } }, "Download"),
+      h("button", { class: "chip", onclick: () => { P.set("snooze:" + e.name, Date.now() + 7 * 864e5); gone(); } }, "Not now"),
+      h("button", { class: "chip", onclick: () => { P.set("noSuggest", [...P.get("noSuggest", []), e.name]); gone(); } }, "Don't suggest")));
+    out.parentNode.append(card); list.scrollTop = list.scrollHeight;
+  }
   return self;
 }
 
@@ -740,7 +801,9 @@ function openSettings() {
     };
     invoke("http_stream", { id, url: S.host + "/api/pull", body: JSON.stringify({ name: S.model }), event: "pull-line" });
   } }, "Download model");
-  const body = h("div", {}, lbl("Ollama address"), host, lbl("Model in use"), model, lbl("Installed models · click one to use it"), mq, installed, h("div", { class: "muted", style: "margin-top:8px" }, tip), pull, prog, pst,
+  const body = h("div", {}, lbl("Ollama address"), host, lbl("Model in use"), model, lbl("Installed models · click one to use it"), mq, installed,
+    lbl("Right model for the task"), toggle("Auto-switch to a good installed model for each task (coding, photos, math, writing)", "autoSwitch", false),
+    toggle("Suggest a better model to download when one would do the task better", "suggestModels", true, v => { if (v) P.set("noSuggest", []); }), h("div", { class: "muted", style: "margin-top:8px" }, tip), pull, prog, pst,
     h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama").then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
     h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"));
   modal("Settings", body, [["Done", save, true]]);

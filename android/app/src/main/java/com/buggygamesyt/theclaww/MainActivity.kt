@@ -621,6 +621,8 @@ class MainActivity : Activity() {
         private val sendArrow = Glyph(this@MainActivity, "up", t.onAccent)
         private val stopSquare = View(this@MainActivity).apply { background = round(t.onAccent, 4); visibility = View.GONE }
         private var proc: Process? = null
+        /** Model this reply runs on: the chosen model, or a better installed one when auto-switch is on. */
+        private var runModel = ""
         private var cancel: (() -> Unit)? = null
         @Volatile private var stopped = false
         private var busy = false
@@ -992,9 +994,19 @@ class MainActivity : Activity() {
             val am = Msg(false, ""); msgs.add(am)
             setBusy(true); stopped = false
             val visual = atts.filter { it.mime.startsWith("image/") || it.mime.startsWith("video/") }
+            val outCol = out.parent as LinearLayout
             thread {
                 val sb = StringBuilder()
                 fun show() { val s = sb.toString().trim(); runOnUiThread { out.text = s.ifEmpty { "…" }; scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } } }
+                // Model advice: auto-switch to a better installed model, and/or suggest a better one to download.
+                runModel = model
+                val adv = installedModels()?.let { inst ->
+                    Advisor.advise(Advisor.task(msg, visual.isNotEmpty(), atts.map { it.name }), inst, model, ramBytes() / 1e9, 0.6)
+                }
+                if (adv?.switchTo != null && prefs.getBoolean("autoSwitch", false)) {
+                    runModel = adv.switchTo
+                    runOnUiThread { outCol.addView(text("Using ${adv.switchTo} for ${Advisor.LABEL[adv.task]}", 12f, muted).apply { setPadding(dp(6), 0, 0, dp(4)) }, 0) }
+                }
                 try {
                     if (visual.isNotEmpty()) visionChat(prior, msg, atts, visual, sb, ::show)
                     else clawChat(prior, msg, atts, sb, ::show)
@@ -1005,9 +1017,33 @@ class MainActivity : Activity() {
                     am.text = sb.toString().trim(); am.stopped = stopped
                     Store.saveConv(conv)
                     val partial = am.text
-                    runOnUiThread { if (stopped) markStopped(out, partial); setBusy(false) }
+                    runOnUiThread {
+                        if (stopped) markStopped(out, partial); setBusy(false)
+                        adv?.suggest?.let { e -> if (!stopped) suggestCard(outCol, adv.task, e, adv.switchTo) }
+                    }
                 }
             }
+        }
+
+        private fun suggestCard(col: LinearLayout, task: String, e: Advisor.E, have: String?) {
+            if (!prefs.getBoolean("suggestModels", true)) return
+            if (e.name in (prefs.getStringSet("noSuggest", emptySet()) ?: emptySet())) return
+            if (System.currentTimeMillis() < prefs.getLong("snooze:${e.name}", 0)) return
+            val what = Advisor.LABEL[task] ?: task
+            val box = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL; background = panel(18); setPadding(dp(14), dp(12), dp(14), dp(12))
+                addView(text("Better model for $what: ${e.name}", 14f, fg, true))
+                addView(text("${"%.1f".format(e.gb)} GB download, runs on this device." +
+                    (if (have != null && !prefs.getBoolean("autoSwitch", false)) " You already have $have, which is good for this. Turn on Auto-switch in Settings to use it automatically." else ""), 12.5f, muted).apply { setPadding(0, dp(4), 0, dp(8)) })
+            }
+            val row = LinearLayout(this@MainActivity)
+            val gone = { (box.parent as? android.view.ViewGroup)?.removeView(box); Unit }
+            row.addView(chip("Download") { Downloads.enqueue(this@MainActivity, host, listOf(e.name)); android.widget.Toast.makeText(this@MainActivity, "Downloading ${e.name} in the background", android.widget.Toast.LENGTH_SHORT).show(); gone() })
+            row.addView(chip("Not now") { prefs.edit().putLong("snooze:${e.name}", System.currentTimeMillis() + 7 * 86400000L).apply(); gone() }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
+            row.addView(chip("Don't suggest") { prefs.edit().putStringSet("noSuggest", (prefs.getStringSet("noSuggest", emptySet()) ?: emptySet()) + e.name).apply(); gone() }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
+            box.addView(row)
+            col.addView(box, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = dp(6) })
+            scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
         }
 
         private fun context(prior: List<Msg>): String {
@@ -1041,7 +1077,7 @@ class MainActivity : Activity() {
             val ctx = context(prior)
             val body = msg.ifEmpty { "Please look at the attached file(s)." } + files
             val prompt = projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body")
-            val pb = ProcessBuilder("${applicationInfo.nativeLibraryDir}/libclaw.so", "--model", model,
+            val pb = ProcessBuilder("${applicationInfo.nativeLibraryDir}/libclaw.so", "--model", runModel,
                 "--dangerously-skip-permissions", "prompt", prompt).directory(work).redirectErrorStream(true)
             val e = pb.environment(); env(e)
             e["CLAW_CONFIG_HOME"] = File(filesDir, "home/.claw").absolutePath
@@ -1084,7 +1120,7 @@ class MainActivity : Activity() {
             cancel = { try { c.disconnect() } catch (_: Exception) {} }
             c.requestMethod = "POST"; c.doOutput = true; c.setRequestProperty("Content-Type", "application/json")
             c.connectTimeout = 5000; c.readTimeout = 600000
-            c.outputStream.use { it.write(JSONObject().put("model", model).put("stream", true).put("messages", messages).toString().toByteArray()) }
+            c.outputStream.use { it.write(JSONObject().put("model", runModel).put("stream", true).put("messages", messages).toString().toByteArray()) }
             val stream = if (c.responseCode >= 400) c.errorStream else c.inputStream
             stream.bufferedReader().forEachLine { line ->
                 if (line.isBlank()) return@forEachLine
@@ -1092,7 +1128,7 @@ class MainActivity : Activity() {
                 if (j.has("error")) {
                     val err = j.getString("error")
                     sb.append(if (err.contains("image", true) || err.contains("vision", true) || err.contains("multimodal", true))
-                        "$model can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:3b or llava-phi3, then try again.\n($err)"
+                        "$runModel can't see images. Pick a vision model in Settings, like gemma3:4b, qwen2.5vl:3b or llava-phi3, then try again.\n($err)"
                         else "Ollama error: $err")
                 } else sb.append(j.optJSONObject("message")?.optString("content") ?: "")
                 show()
@@ -1326,6 +1362,15 @@ class MainActivity : Activity() {
         box.addView(label("Remote Ollama host (when not on this device)")); box.addView(hostF)
         box.addView(label("Model in use")); box.addView(modelF)
         box.addView(label("Installed models · tap one to use it")); box.addView(modelSearch, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(8) }); box.addView(modelList)
+        box.addView(label("Right model for the task"))
+        box.addView(Switch(this).apply {
+            text = "Auto-switch to a good installed model for each task (coding, photos, math, writing)"; setTextColor(fg); isChecked = prefs.getBoolean("autoSwitch", false)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("autoSwitch", on).apply() }
+        })
+        box.addView(Switch(this).apply {
+            text = "Suggest a better model to download when one would do the task better"; setTextColor(fg); isChecked = prefs.getBoolean("suggestModels", true)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("suggestModels", on).apply(); if (on) prefs.edit().remove("noSuggest").apply() }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(6) })
         val ramGb = (android.app.ActivityManager.MemoryInfo().also { (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).getMemoryInfo(it) }.totalMem / 1_000_000_000.0)
         val tip = (if (ramGb >= 12) "This device has ${"%.0f".format(ramGb)} GB RAM: it can run 7–8B models like qwen2.5-coder:7b or llama3.1:8b. Small ones (llama3.2:3b) are faster."
                   else "This device has ${"%.0f".format(ramGb)} GB RAM: best with 1–3B models like llama3.2:3b, qwen2.5-coder:1.5b, gemma3:1b.") +
@@ -1386,6 +1431,12 @@ class MainActivity : Activity() {
 
 
     // ===================== Model browser =====================
+    /** Names of models installed in Ollama, or null when it can't be reached. */
+    private fun installedModels(): List<String>? = try {
+        val a = JSONObject(URL("$host/api/tags").readText()).getJSONArray("models")
+        (0 until a.length()).map { a.getJSONObject(it).getString("name") }
+    } catch (e: Exception) { null }
+
     private fun ramBytes(): Long = android.app.ActivityManager.MemoryInfo().also { (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).getMemoryInfo(it) }.totalMem
     private fun fit(bytes: Long): Pair<String, Int> {
         if (bytes <= 0) return "" to muted

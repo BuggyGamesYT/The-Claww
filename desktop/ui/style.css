@@ -183,3 +183,5 @@ body.wide #projSide { display: block; width: 28%; flex: none; overflow-y: auto; 
 .side-proj:hover { color: var(--fg); }
 .side-chat { font-size: 14px; padding: 7px 12px 7px 28px; color: var(--muted); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-chat.on, .side-chat:hover { color: var(--fg); }
+
+.suggest { border-radius: 18px; padding: 12px 14px; margin-top: 6px; max-width: 80%; }
