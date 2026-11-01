@@ -1,16 +1,16 @@
 name: Upstream sync & Claww release
 
-# Weekly: sync main with ultraworkers/claw-code, merge it into android-app, mirror the
-# original owner's releases as separate "Upstream claw-code" releases (never Latest),
-# then build one combined Claww release (Android + Windows + Linux) marked Latest, on top.
+# Hourly: sync main with ultraworkers/claw-code and merge it into android-app, so every upstream
+# change comes in as it lands. When upstream publishes a new release version (v0.2.0, v1.0, ...),
+# build one combined Claww release with that same version (Android + Windows + Linux), marked Latest.
 # If upstream changes workflow files, add a repo secret SYNC_TOKEN (PAT with repo + workflow scopes).
 on:
   schedule:
-    - cron: "0 13 * * 1"   # Mondays 13:00 UTC (8-9 AM Eastern)
+    - cron: "17 * * * *"   # every hour
   workflow_dispatch:
     inputs:
       force_release:
-        description: "Build a Claww release even if upstream didn't change"
+        description: "Build a Claww release even if upstream has no new release"
         type: boolean
         default: false
 
@@ -40,22 +40,16 @@ jobs:
           echo "merge status: ${code:-none}"
           if [ "$code" = "409" ]; then echo "::error::android-app has a merge conflict with upstream; fix it by hand."; exit 1; fi
           [ "$code" = "201" ] && echo "MERGED=true" >> "$GITHUB_ENV" || true
-      - name: Mirror upstream releases (separate, never Latest)
+      - name: Check for a new upstream release
         run: |
-          MIRRORED=false
-          for tag in $(gh release list -R "$UP" --limit 3 --exclude-drafts --json tagName --jq '.[].tagName' | tac); do
-            mt="upstream-$tag"
-            if gh release view "$mt" -R "$REPO" >/dev/null 2>&1; then continue; fi
-            rm -rf up && mkdir up
-            gh release download "$tag" -R "$UP" -D up || true
-            name=$(gh release view "$tag" -R "$UP" --json name --jq .name)
-            gh release create "$mt" -R "$REPO" --target main --latest=false \
-              --title "Upstream claw-code ${name:-$tag}" \
-              --notes "Original binaries from [ultraworkers/claw-code ${tag}](https://github.com/$UP/releases/tag/${tag}), mirrored unchanged. For The Claww app (Android, Windows, Linux), use the Latest release." \
-              $(ls up/* 2>/dev/null)
-            MIRRORED=true
-          done
-          echo "MIRRORED=$MIRRORED" >> "$GITHUB_ENV"
+          up_tag=$(gh api "repos/$UP/releases/latest" --jq .tag_name 2>/dev/null || true)
+          ver="${up_tag#v}"
+          if [ -z "$ver" ]; then echo "NEW_RELEASE=false" >> "$GITHUB_ENV"; exit 0; fi
+          if gh release list -R "$REPO" --limit 200 --json tagName --jq '.[].tagName' | grep -qE "^claww-v${ver//./\\.}(-[0-9]+)?$"; then
+            echo "Already released The Claww v$ver"; echo "NEW_RELEASE=false" >> "$GITHUB_ENV"
+          else
+            echo "New upstream release $up_tag"; echo "NEW_RELEASE=true" >> "$GITHUB_ENV"
+          fi
       - name: Start Claww release (goes on top as Latest)
-        if: steps.s.outputs.changed == 'true' || env.MERGED == 'true' || env.MIRRORED == 'true' || inputs.force_release
-        run: gh workflow run claww-release.yml --ref android-app -R "$REPO" -f notes="Includes the latest upstream claw-code changes."
+        if: env.NEW_RELEASE == 'true' || inputs.force_release
+        run: gh workflow run claww-release.yml --ref android-app -R "$REPO" -f notes="Built for the new upstream claw-code release."
