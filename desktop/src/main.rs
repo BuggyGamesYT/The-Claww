@@ -46,6 +46,140 @@ const WALLPAPERS: [(&str, Option<(Color32, Color32)>); 6] = [
     ("Your photo", None),
 ];
 
+/// Animated wallpapers, drawn every frame.
+const ANIMATED: [&str; 4] = ["Drift", "Lava", "Northern lights", "Stars"];
+
+fn mixc(a: Color32, b: Color32, f: f32) -> Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+fn rnd(n: u32) -> f32 {
+    let mut x = n.wrapping_mul(0x9E37_79B1).wrapping_add(0x7F4A_7C15);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x85EB_CA77);
+    x ^= x >> 13;
+    x = x.wrapping_mul(0xC2B2_AE3D);
+    x ^= x >> 16;
+    (x & 0x00FF_FFFF) as f32 / 16_777_216.0
+}
+
+/// The background gradient (top, bottom) under an animated wallpaper at `time` seconds.
+fn anim_base(name: &str, time: f32) -> Option<(Color32, Color32)> {
+    match name {
+        "Drift" => {
+            let pal = [rgb(255, 120, 80), rgb(120, 80, 200), rgb(20, 160, 150), rgb(40, 110, 220), rgb(220, 70, 140)];
+            let s = time * 0.04;
+            let i = s.floor() as usize;
+            let f = s.fract();
+            let f = f * f * (3.0 - 2.0 * f);
+            let n = pal.len();
+            let top = mixc(pal[i % n], pal[(i + 1) % n], f);
+            let bot = mixc(mixc(pal[(i + 2) % n], pal[(i + 3) % n], f), rgb(10, 8, 25), 0.45);
+            Some((top, bot))
+        }
+        "Lava" => Some((rgb(70, 12, 48), rgb(18, 4, 28))),
+        "Northern lights" => Some((rgb(4, 10, 30), rgb(8, 32, 52))),
+        "Stars" => Some((rgb(4, 4, 18), rgb(30, 14, 54))),
+        _ => None,
+    }
+}
+
+fn vgrad(p: &egui::Painter, r: egui::Rect, top: Color32, bot: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(r.left_top(), top);
+    mesh.colored_vertex(r.right_top(), top);
+    mesh.colored_vertex(r.right_bottom(), bot);
+    mesh.colored_vertex(r.left_bottom(), bot);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    p.add(egui::Shape::mesh(mesh));
+}
+
+fn soft_blob(p: &egui::Painter, c: egui::Pos2, rad: f32, col: Color32, alpha: u8) {
+    for k in 0..10 {
+        let f = k as f32 / 10.0;
+        p.circle_filled(c, rad * (1.0 - f * 0.75), Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), alpha));
+    }
+}
+
+/// Paint animated wallpaper `name` into `r`. Returns false when `name` isn't animated.
+fn paint_anim(painter: &egui::Painter, r: egui::Rect, name: &str, time: f32) -> bool {
+    let Some((top, bot)) = anim_base(name, time) else { return false };
+    let p = painter.with_clip_rect(r.intersect(painter.clip_rect()));
+    vgrad(&p, r, top, bot);
+    let size = r.width().min(r.height());
+    match name {
+        "Drift" => {
+            for i in 0..3 {
+                let fi = i as f32;
+                let c = egui::pos2(
+                    r.left() + r.width() * (0.5 + 0.4 * (time * 0.05 * (1.0 + fi * 0.2) + fi * 2.1).sin()),
+                    r.top() + r.height() * (0.5 + 0.4 * (time * 0.04 * (1.0 + fi * 0.15) + fi * 1.3).cos()),
+                );
+                soft_blob(&p, c, size * 0.45, Color32::WHITE, 4);
+            }
+        }
+        "Lava" => {
+            let cols = [rgb(255, 90, 60), rgb(255, 60, 140), rgb(255, 160, 60)];
+            for i in 0..6 {
+                let fi = i as f32;
+                let c = egui::pos2(
+                    r.left() + r.width() * (0.5 + 0.4 * (time * 0.09 * (1.0 + fi * 0.13) + fi * 1.7).sin()),
+                    r.top() + r.height() * (0.5 + 0.42 * (time * 0.06 * (1.0 + fi * 0.11) + fi * 2.3).cos()),
+                );
+                let rad = size * (0.2 + 0.06 * (time * 0.4 + fi).sin());
+                soft_blob(&p, c, rad, cols[i % 3], 26);
+            }
+        }
+        "Northern lights" => {
+            let cols = [rgb(60, 255, 160), rgb(40, 200, 220), rgb(170, 90, 255)];
+            const N: usize = 64;
+            for (j, col) in cols.iter().enumerate() {
+                let fj = j as f32;
+                let h = r.height() * 0.28;
+                let mut mesh = egui::Mesh::default();
+                for i in 0..=N {
+                    let fx = i as f32 / N as f32;
+                    let x = r.left() + r.width() * fx;
+                    let y = r.top()
+                        + r.height() * (0.3 + 0.12 * fj)
+                        + r.height() * 0.06 * (fx * 6.0 + time * (0.25 + 0.07 * fj) + fj * 1.9).sin()
+                        + r.height() * 0.03 * (fx * 13.0 - time * 0.4 + fj).sin();
+                    let glow = 0.55 + 0.45 * (fx * 4.0 + time * 0.3 + fj * 2.0).sin();
+                    let a = (150.0 * glow) as u8;
+                    let clear = Color32::TRANSPARENT;
+                    mesh.colored_vertex(egui::pos2(x, y - h), clear);
+                    mesh.colored_vertex(egui::pos2(x, y), Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a));
+                    mesh.colored_vertex(egui::pos2(x, y + h * 0.18), clear);
+                    if i > 0 {
+                        let b = (i as u32) * 3;
+                        let a0 = b - 3;
+                        mesh.add_triangle(a0, a0 + 1, b + 1);
+                        mesh.add_triangle(a0, b + 1, b);
+                        mesh.add_triangle(a0 + 1, a0 + 2, b + 2);
+                        mesh.add_triangle(a0 + 1, b + 2, b + 1);
+                    }
+                }
+                p.add(egui::Shape::mesh(mesh));
+            }
+        }
+        "Stars" => {
+            let count = ((r.width() * r.height()) / 6000.0).clamp(12.0, 220.0) as u32;
+            for i in 0..count {
+                let x = r.left() + r.width() * rnd(i * 4);
+                let speed = 0.004 + 0.01 * rnd(i * 4 + 2);
+                let y = r.top() + r.height() * (rnd(i * 4 + 1) + time * speed).fract();
+                let tw = 0.5 + 0.5 * (time * (0.8 + 2.0 * rnd(i * 4 + 3)) + i as f32).sin();
+                let rad = (0.6 + 1.3 * rnd(i * 4 + 3)) * (size / 600.0).clamp(0.5, 1.0);
+                p.circle_filled(egui::pos2(x, y), rad, Color32::from_white_alpha((60.0 + 195.0 * tw) as u8));
+            }
+        }
+        _ => {}
+    }
+    true
+}
+
 const GOOD: Color32 = rgb(80, 200, 120);
 const AMBER: Color32 = rgb(240, 180, 60);
 
@@ -158,6 +292,8 @@ struct App {
     /// Where the photo wallpaper was drawn last frame (screen rect, texture uv), for the top fade.
     wall_photo_geom: Option<(egui::Rect, egui::Rect)>,
     photo_error: Option<String>,
+    /// Seconds since start, drives animated wallpapers.
+    anim_time: f32,
     scroll_to_bottom: bool,
 }
 
@@ -234,6 +370,7 @@ impl App {
             tried_start: false,
             wall_tex: None,
             wall_photo_geom: None,
+            anim_time: 0.0,
             photo_error: None,
             scroll_to_bottom: false,
         };
@@ -478,7 +615,9 @@ impl App {
         let grad = WALLPAPERS.iter().find(|(n, _)| *n == self.cfg.wall).and_then(|(_, g)| *g);
         let mut painted = false;
         self.wall_photo_geom = None;
-        if let Some((top, bot)) = grad {
+        if paint_anim(painter, rect, &self.cfg.wall, self.anim_time) {
+            painted = true;
+        } else if let Some((top, bot)) = grad {
             let mut mesh = egui::Mesh::default();
             mesh.colored_vertex(rect.left_top(), top);
             mesh.colored_vertex(rect.right_top(), top);
@@ -531,7 +670,7 @@ impl App {
     fn paint_top_fade(&self, painter: &egui::Painter, full: egui::Rect, band: egui::Rect) {
         const STRIPS: usize = 12;
         let t = self.cfg.theme();
-        let grad = WALLPAPERS.iter().find(|(n, _)| *n == self.cfg.wall).and_then(|(_, g)| *g);
+        let grad = WALLPAPERS.iter().find(|(n, _)| *n == self.cfg.wall).and_then(|(_, g)| *g).or_else(|| anim_base(&self.cfg.wall, self.anim_time));
         let dim = self.cfg.dim as f32 / 100.0;
         let mix = |a: Color32, b: Color32, f: f32| {
             let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f).round() as u8;
@@ -735,6 +874,19 @@ impl App {
                         }
                     }
                 });
+                ui.label(RichText::new("Animated").size(12.0).color(t.muted));
+                ui.horizontal(|ui| {
+                    let time = self.anim_time;
+                    for name in ANIMATED.iter() {
+                        let sel = *name == self.cfg.wall;
+                        if Self::swatch(ui, &t, name, sel, |p, r| {
+                            paint_anim(p, r, name, time);
+                        }) {
+                            self.cfg.wall = (*name).into();
+                            restyle = true;
+                        }
+                    }
+                });
                 if self.cfg.wall == "Your photo" {
                     ui.label(RichText::new("Photo file (PNG, JPEG or WebP)").size(12.0).color(t.muted));
                     ui.horizontal(|ui| {
@@ -796,6 +948,7 @@ fn lerp(a: Color32, b: Color32) -> Color32 {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_reply();
+        self.anim_time = ctx.input(|i| i.time) as f32;
         let st = self.status.lock().unwrap().clone();
         self.ensure_ollama(st.reachable);
         let t = self.cfg.theme();
@@ -951,7 +1104,9 @@ impl eframe::App for App {
         if self.show_look {
             self.look_window(ctx);
         }
-        if self.reply.is_some() || self.pull.lock().unwrap().running {
+        if ANIMATED.contains(&self.cfg.wall.as_str()) || self.show_look {
+            ctx.request_repaint_after(Duration::from_millis(33));
+        } else if self.reply.is_some() || self.pull.lock().unwrap().running {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
