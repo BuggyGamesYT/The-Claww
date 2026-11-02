@@ -657,6 +657,8 @@ class MainActivity : Activity() {
 
     // ===================== Chat pane (used by Chat tab and inside projects) =====================
     class Att(val path: String, val mime: String, val name: String)
+    /** A message sent while a reply was running. redo = stop the reply and answer again with this added. */
+    class Queued(val msg: String, val atts: List<Att>, val redo: Boolean)
 
     /** [mode] null = regular Chat tab; non-null = project chat (project comes from the open conversation). */
     inner class ChatPane(private val mode: String?) {
@@ -878,7 +880,6 @@ class MainActivity : Activity() {
         }
 
         /** Messages sent while a reply was running. redo = stop the reply and answer again with this added. */
-        private class Queued(val msg: String, val atts: List<Att>, val redo: Boolean)
         private val queue = ArrayDeque<Queued>()
         private var redoNext = false
         private var lastAsk = ""
