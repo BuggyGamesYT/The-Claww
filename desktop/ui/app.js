@@ -458,6 +458,10 @@ function showProjectDetail(p) {
   el.append(h("div", { class: "card panel click", onclick: async () => { const t = await ask("Project notes", "Goals, context, rules", p.notes, true); if (t != null) { p.notes = t; Store.saveProjects(); showProjectDetail(p); } } },
     h("div", { class: "hdr" }, "Project notes"), h("div", { style: "white-space:pre-wrap", class: p.notes ? "" : "muted" }, p.notes || "Click to add goals, context or rules claw should follow in this project."),
     h("div", { class: "muted", style: "margin-top:8px;font-size:11px" }, "Folder: " + projectDir(p))));
+  { const on = Builds.on(p.id);
+    el.append(h("div", { class: "card panel click", onclick: () => Builds.settings(p) }, h("div", { class: "hdr" }, "GitHub builds"),
+      h("div", { style: "white-space:pre-wrap", class: on ? "" : "muted" }, on ? Builds.repo(p.id) + (Builds.branch(p.id) ? " · " + Builds.branch(p.id) : "") + "\n" + ([Builds.fix(p.id) && "auto-fix", Builds.test(p.id) && "test passing builds"].filter(Boolean).join(" · ") || "watching only") : "Click to watch a repo's builds and auto-fix failures."),
+      on && Builds.status(p.id) ? h("div", { class: "muted", style: "font-size:12px;margin-top:4px" }, Builds.status(p.id)) : "")); }
   el.append(h("button", { class: "btn-accent", onclick: () => openProjectChat(Store.newConv(p.id)) }, plusIcon(), `New chat in ${p.name}`));
   const chats = Store.ofProject(p.id);
   if (chats.length) el.append(h("div", { class: "hdr", style: "margin:8px 4px" }, "Chats"));
@@ -758,7 +762,7 @@ const ollamaCrashNote = (m, retried) => `Ollama stopped while running ${m}` + (r
 const toolHint = nudge => `Today is ${new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. ` +
   "You can use tools: WebSearch and WebFetch for anything current or online (weather, news, prices, scores, hours, facts you're unsure of), bash for commands and files. Never say you lack internet or real-time access; search instead." +
   " For weather, WebFetch https://wttr.in/CITY?format=4 (spaces as +, add ?u for °F), which returns plain text." +
-  (GH_ON ? " GitHub: you're signed in as the user. In bash, $GITHUB_TOKEN is set: read repos, files, issues and Actions with curl -s -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/... (start with /user and /user/repos), and clone or push with https://x-access-token:$GITHUB_TOKEN@github.com/OWNER/REPO.git. Never print the token. Ask before pushing, deleting or changing anything on GitHub." : "") +
+  (GH_ON ? " GitHub: you're signed in as the user. In bash, $GITHUB_TOKEN is set: read repos, files, issues and Actions with curl -s -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/... (start with /user and /user/repos), and clone or push with https://x-access-token:$GITHUB_TOKEN@github.com/OWNER/REPO.git. Never print the token. Push, commit or start builds when the message asks you to (like a [Build watcher] message); otherwise ask first, and always ask before deleting anything on GitHub." : "") +
   (nudge ? " Your last answer said you couldn't look this up. You can: call WebSearch now, then answer from the results." : "") + "\n\n";
 let GH_ON = false;
 const saysNoWeb = t => /(real[- ]time|up[- ]to[- ]date|current) (weather|data|information|info|news|prices?)|(don'?t|do not|can'?t|cannot|unable to) (have )?(access|browse|search|check|look up|retrieve)[^.]{0,40}(internet|web|online|real[- ]time|external|current)|as an ai[^.]{0,40}(no|not|don'?t)[^.]{0,30}(internet|real[- ]time)/i.test(String(t || ""));
@@ -954,6 +958,110 @@ function syncSection() {
 }
 
 // ---------- Remember (optional): facts the user asks every chat to know ----------
+// Build watcher: a project can watch a GitHub repo's Actions builds. When a build fails, the project's chat gets the
+// errors and is asked to fix, commit, push and start it again; when one passes it can be asked to test it.
+// At most MAX automatic turns in a row; anything the user types in the project resets the count. Same as Android.
+// A small message at the bottom of the window for a few seconds.
+function notify(text) {
+  const n = h("div", { style: "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:999;padding:10px 16px;border-radius:14px;background:rgba(30,30,30,.92);color:#fff;font-size:13px;max-width:80vw" }, text);
+  document.body.append(n); setTimeout(() => n.remove(), 5000);
+}
+const Builds = {
+  MAX: 3, events: [],
+  repo: pid => String(P.get("ciRepo_" + pid, "")).trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").replace(/^\/+|\/+$/g, ""),
+  branch: pid => String(P.get("ciBranch_" + pid, "")).trim(),
+  fix: pid => P.get("ciFix_" + pid, true),
+  test: pid => P.get("ciTest_" + pid, false),
+  on(pid) { return this.repo(pid).includes("/"); },
+  userSpoke(pid) { P.set("ciTries_" + pid, 0); },
+  status: pid => P.get("ciStatus_" + pid, ""),
+  errorLines(log, max = 3500) {
+    const bad = /(\berror\b|^e: |failed|failure|exception|cannot find|unresolved|not found|undefined|expected|panicked|syntaxerror|traceback)/i;
+    const noise = /(process completed with exit code|##\[group]|##\[endgroup]|deprecat|warning:|--stacktrace|--info or --debug|--scan|help\.gradle|run with)/i;
+    const lines = [...new Set(String(log).split("\n").map(l => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s?/, "").replace("##[error]", "").trimEnd())
+      .filter(l => l.trim() && bad.test(l) && !noise.test(l)))].slice(-30);
+    let out = lines.join("\n"); if (out.length > max) out = out.slice(-max);
+    return out || String(log).split("\n").filter(l => l.trim()).slice(-25).join("\n").slice(-max);
+  },
+  async check() {
+    const out = [];
+    for (const pr of Store.projects.filter(p => this.on(p.id))) {
+      const pid = pr.id, repo = this.repo(pid), br = this.branch(pid);
+      try {
+        const runs = JSON.parse(await Sync.api("GET", `/repos/${repo}/actions/runs?per_page=10${br ? "&branch=" + encodeURIComponent(br) : ""}`)).workflow_runs || [];
+        const run = runs.find(r => r.status === "completed"); if (!run) continue;
+        const running = runs.some(r => r.status !== "completed");
+        const { id, name, run_number: num, head_branch: branchName, html_url: url, conclusion: concl } = run, sha = String(run.head_sha).slice(0, 7);
+        P.set("ciStatus_" + pid, `${name} #${num}: ${running ? "newer build running" : concl || "done"}`);
+        const last = P.get("ciLast_" + pid, 0);
+        if (!last) { P.set("ciLast_" + pid, id); continue; }
+        if (id <= last) continue;
+        P.set("ciLast_" + pid, id);
+        if (concl === "cancelled" || concl === "skipped") continue;
+        const tries = P.get("ciTries_" + pid, 0);
+        if (concl === "success") {
+          if (!this.test(pid)) { P.set("ciTries_" + pid, 0); continue; }
+          if (tries >= this.MAX) continue;
+          P.set("ciTries_" + pid, tries + 1);
+          out.push({ project: pid, prompt: `[Build watcher] GitHub build "${name}" #${num} passed on ${branchName} (${sha}): ${url}\nTest it: in this project folder, clone https://github.com/${repo} (or git pull if it's already here) on ${branchName}, then run its tests and checks (unit tests, a compile or syntax check, a linter, whatever this repo has). If you find a real bug, fix it, commit, and push. If everything passes, don't push anything; just tell me the result.` });
+          continue;
+        }
+        if (!this.fix(pid)) continue;
+        if (tries >= this.MAX) {
+          if (tries === this.MAX) { P.set("ciTries_" + pid, this.MAX + 1);
+            out.push({ project: pid, prompt: `[Build watcher] Build "${name}" #${num} failed again on ${branchName} (${sha}) after ${this.MAX} automatic fixes: ${url}\nDon't change anything yet. Explain in plain words what's still failing and what you'd try next, and wait for me.` }); }
+          continue;
+        }
+        P.set("ciTries_" + pid, tries + 1);
+        const jobs = (JSON.parse(await Sync.api("GET", `/repos/${repo}/actions/runs/${id}/jobs?per_page=50`)).jobs || []).filter(j => j.conclusion === "failure").slice(0, 2);
+        const errs = [];
+        for (const j of jobs) {
+          let log; try { log = await invoke("github_job_log", { repo, job: j.id }); } catch (e) { log = "(couldn't read the log: " + e + ")"; }
+          errs.push(`Job "${j.name}":\n` + this.errorLines(log, jobs.length > 1 ? 1800 : 3500));
+        }
+        const wf = String(run.path || "").split("/").pop();
+        out.push({ project: pid, prompt: `[Build watcher] GitHub build "${name}" #${num} failed on ${branchName} (${sha}): ${url}\nErrors from the log:\n\`\`\`\n${errs.join("\n\n")}\n\`\`\`\nFix it: in this project folder, clone https://github.com/${repo} (or git pull if it's already here) on ${branchName}, find the cause in the code, fix it, check it compiles or passes a syntax check if you can, then commit and push to ${branchName}. ` +
+          (wf ? `If the build doesn't start on its own after the push, start it with a POST to /repos/${repo}/actions/workflows/${wf}/dispatches with {"ref":"${branchName}"}. ` : "") +
+          `Then tell me in a sentence or two what was wrong and what you changed. (Automatic fix ${tries + 1} of ${this.MAX}.)` });
+      } catch (e) { P.set("ciStatus_" + pid, "Couldn't check: " + String(e).slice(0, 120)); }
+    }
+    return out;
+  },
+  // Posts each turn into its project's chat, waiting while another project's chat is replying.
+  deliver() {
+    while (this.events.length) {
+      const e = this.events[0], p = Store.project(e.project);
+      if (!p) { this.events.shift(); continue; }
+      if (!projPane.conv || projPane.conv.project !== p.id) {
+        if (projPane.isBusy()) return;
+        openProject = p; projPane.open(Store.ofProject(p.id)[0] || Store.newConv(p.id));
+      }
+      this.events.shift();
+      notify(`${/ passed on /.test(e.prompt) ? "Testing the new build" : / failed again /.test(e.prompt) ? "Build still failing" : "Build failed, fixing it"} in ${p.name}`);
+      projPane.autoSend(e.prompt);
+    }
+  },
+  async loop() {
+    try { if (GH_ON && Store.projects.some(p => this.on(p.id))) this.events.push(...await this.check()); this.deliver(); } catch {}
+    setTimeout(() => this.loop(), 90000);
+  },
+  settings(p) {
+    const repoF = h("input", { class: "field", placeholder: "owner/repo" }); repoF.value = this.repo(p.id);
+    const brF = h("input", { class: "field", placeholder: "Branch (blank = all)", style: "margin-top:8px" }); brF.value = this.branch(p.id);
+    const sw = (label, on) => { const c = h("input", { type: "checkbox" }); c.checked = on; return [c, h("label", { class: "row", style: "gap:8px;margin-top:10px" }, c, label)]; };
+    const [fixC, fixL] = sw("Auto-fix failed builds", this.fix(p.id)), [testC, testL] = sw("Test each build that passes", this.test(p.id));
+    const body = h("div", {}, repoF, brF, fixL, testL, h("div", { class: "muted", style: "font-size:12px;margin-top:10px" },
+      `Checks every 90 seconds while the app is open, using your GitHub token from Settings. A failed build's errors go to this project's chat, and the model fixes, commits, pushes and restarts it, up to ${this.MAX} times in a row. Typing in the project resets the count. Use a model that's good with tools, like qwen3.` + (GH_ON ? "" : " Add your GitHub token in Settings first.")));
+    modal("GitHub builds", body, [
+      ["Stop watching", () => { P.set("ciRepo_" + p.id, ""); P.set("ciLast_" + p.id, 0); P.set("ciStatus_" + p.id, ""); showProjectDetail(p); }],
+      ["Cancel", null],
+      ["Save", () => { const r = repoF.value.trim(), old = this.repo(p.id);
+        P.set("ciRepo_" + p.id, r); P.set("ciBranch_" + p.id, brF.value.trim()); P.set("ciFix_" + p.id, fixC.checked); P.set("ciTest_" + p.id, testC.checked); P.set("ciTries_" + p.id, 0);
+        if (r !== old) { P.set("ciLast_" + p.id, 0); P.set("ciStatus_" + p.id, ""); }
+        showProjectDetail(p); }, true]]);
+  },
+};
+
 const Remember = {
   on: () => P.get("rememberOn", false),
   list: () => P.get("remember", []) || [],
@@ -1261,7 +1369,9 @@ function ChatPane(root, projectMode) {
   };
   const setBusy = b => { busy = b; updateBtns(); };
   // Messages sent while a reply was running. redo = stop the reply and answer again with this added.
-  const queue = []; let redoNext = false, lastAsk = "";
+  const queue = []; let redoNext = false, autoNext = false, lastAsk = "";
+  // A turn the app posts by itself (the build watcher). Goes out now, or after the reply that's running.
+  self.autoSend = text => { queue.push({ text, atts: [], redo: false, auto: true }); if (!busy) drainQueue(); };
   const sendWhileBusy = () => {
     const text = input.value.trim(), atts = pending.slice();
     const take = () => { input.value = ""; input.style.height = "auto"; pending = []; renderPending(); updateBtns(); };
@@ -1273,7 +1383,7 @@ function ChatPane(root, projectMode) {
   const drainQueue = () => {
     if (busy || !queue.length) return;
     const q = queue.shift(), draft = input.value, draftAtts = pending.slice();
-    redoNext = q.redo; input.value = q.text; pending = q.atts.slice();
+    redoNext = q.redo; autoNext = !!q.auto; input.value = q.text; pending = q.atts.slice();
     self.send();
     input.value = draft; pending = draftAtts; renderPending(); updateBtns();
   };
@@ -1398,6 +1508,9 @@ function ChatPane(root, projectMode) {
     const redo = redoNext && lastAsk; redoNext = false;
     if (redo) text = `I stopped your last reply. Do my earlier request again ("${lastAsk}"), and take this into account: ${text}`;
     else lastAsk = text.slice(0, 1500);
+    // Anything the user types in a project resets the build watcher's automatic-turn count.
+    if (!autoNext && conv.project) Builds.userSpoke(conv.project);
+    autoNext = false;
     const out = bubble("…", false);
     const am = { u: false, t: "" }; msgs.push(am);
     setBusy(true); stopped = false;
@@ -2042,7 +2155,7 @@ let chatPane, projPane;
   if (/127\.0\.0\.1|localhost/.test(S.host) && await invoke("fix_ollama_service").catch(() => false)) await new Promise(r => setTimeout(r, 2500));
   try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", ollamaEnv()).catch(() => {}); }
   invoke("gpu_info").then(g => { if (g && g.vram) P.set("vramBytes", g.vram); }).catch(() => {});
-  invoke("github_status").then(on => { GH_ON = !!on; }).catch(() => {});
+  invoke("github_status").then(on => { GH_ON = !!on; }).catch(() => {}).finally(() => setTimeout(() => Builds.loop(), 20000));
   pollStatus(); setInterval(pollStatus, 4000);
   Sync.run(); setInterval(() => Sync.run(), 5 * 60000); addEventListener("focus", () => Sync.run());
   checkNewModels(false); setInterval(() => checkNewModels(false), 30 * 60000);

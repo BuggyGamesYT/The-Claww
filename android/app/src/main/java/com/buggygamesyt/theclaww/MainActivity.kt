@@ -207,6 +207,7 @@ class MainActivity : Activity() {
         try { if (Build.VERSION.SDK_INT >= 26) startForegroundService(Intent(this, ClawService::class.java)) } catch (_: Exception) {}
         if (builtIn) startOllama()
         pollStatus()
+        buildWatch()
         if (intent?.action == "models") openModels()
         handleShare(intent)
     }
@@ -571,6 +572,15 @@ class MainActivity : Activity() {
             addView(text("Folder: " + File(filesDir, "projects/${p.id}").absolutePath, 11f, muted).apply { setPadding(0, dp(8), 0, 0) })
             setOnClickListener { ask("Project notes", "Goals, context, rules", p.notes, true) { p.notes = it; Store.saveProjects(); showProjectDetail(p) } }
         }, cardLp())
+        projDetail.addView(card().apply {
+            addView(text("GITHUB BUILDS", 11f, muted, true).apply { letterSpacing = 0.08f })
+            val on = Builds.on(prefs, p.id)
+            addView(text(if (on) Builds.repo(prefs, p.id) + (Builds.branch(prefs, p.id).takeIf { it.isNotEmpty() }?.let { " · $it" } ?: "") +
+                    "\n" + listOfNotNull(if (Builds.fix(prefs, p.id)) "auto-fix" else null, if (Builds.test(prefs, p.id)) "test passing builds" else null).joinToString(" · ").ifEmpty { "watching only" }
+                else "Tap to watch a repo's builds and auto-fix failures.", 14f, if (on) fg else muted).apply { setPadding(0, dp(6), 0, 0) })
+            Builds.status(prefs, p.id).takeIf { on && it.isNotEmpty() }?.let { addView(text(it, 12f, muted).apply { setPadding(0, dp(4), 0, 0) }) }
+            setOnClickListener { buildSettings(p) }
+        }, cardLp())
         projDetail.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER; background = round(accent, 22); setPadding(dp(16), dp(14), dp(16), dp(14))
             addView(Glyph(this@MainActivity, "plus", t.onAccent), LinearLayout.LayoutParams(dp(14), dp(14)).apply { rightMargin = dp(10) })
@@ -658,7 +668,7 @@ class MainActivity : Activity() {
     // ===================== Chat pane (used by Chat tab and inside projects) =====================
     class Att(val path: String, val mime: String, val name: String)
     /** A message sent while a reply was running. redo = stop the reply and answer again with this added. */
-    class Queued(val msg: String, val atts: List<Att>, val redo: Boolean)
+    class Queued(val msg: String, val atts: List<Att>, val redo: Boolean, val auto: Boolean = false)
 
     /** [mode] null = regular Chat tab; non-null = project chat (project comes from the open conversation). */
     inner class ChatPane(private val mode: String?) {
@@ -882,7 +892,11 @@ class MainActivity : Activity() {
         /** Messages sent while a reply was running. redo = stop the reply and answer again with this added. */
         private val queue = ArrayDeque<Queued>()
         private var redoNext = false
+        private var autoNext = false
         private var lastAsk = ""
+
+        /** A turn the app posts by itself (the build watcher). Goes out now, or after the reply that's running. */
+        fun autoSend(msg: String) { queue.addLast(Queued(msg, emptyList(), false, true)); if (!busy) drainQueue() }
 
         private fun sendWhileBusy() {
             val msg = input.text.toString().trim(); val atts = pending.toList()
@@ -908,7 +922,7 @@ class MainActivity : Activity() {
             if (busy) return
             val q = queue.removeFirstOrNull() ?: return
             val draft = input.text.toString(); val draftAtts = pending.toList()
-            redoNext = q.redo
+            redoNext = q.redo; autoNext = q.auto
             input.setText(q.msg); pending.clear(); pending.addAll(q.atts)
             onSend()
             input.setText(draft); pending.clear(); pending.addAll(draftAtts); renderPending(); updateBtns()
@@ -1197,6 +1211,9 @@ class MainActivity : Activity() {
             val redo = redoNext && lastAsk.isNotBlank(); redoNext = false
             val ask = if (redo) "I stopped your last reply. Do my earlier request again (\"$lastAsk\"), and take this into account: $msg" else msg
             if (!redo) lastAsk = msg.take(1500)
+            // Anything the user types in a project resets the build watcher's automatic-turn count.
+            if (!autoNext) conv.project?.let { Builds.userSpoke(prefs, it) }
+            autoNext = false
             val um = Msg(true, msg, atts.map { it.path }); msgs.add(um)
             if (conv.title == "New chat") {
                 conv.title = (msg.ifEmpty { atts.first().name }).lines().first().take(40)
@@ -1750,6 +1767,65 @@ class MainActivity : Activity() {
             .lastOrNull { Regex("error|fatal|panic|signal|denied|cannot|failed|not found", RegexOption.IGNORE_CASE).containsMatchIn(it) }
             ?.take(160)
     } catch (_: Exception) { null }
+
+    // ===================== Build watcher =====================
+    private val buildEvents = ArrayDeque<Builds.Event>()
+    private fun buildWatch() = thread {
+        Thread.sleep(20000)
+        while (alive) {
+            try {
+                val token = Secrets.get(this, GitHubMcp.TOKEN)
+                val watching = Store.projects.filter { Builds.on(prefs, it.id) }
+                if (!token.isNullOrBlank() && watching.isNotEmpty()) {
+                    val ev = Builds.check(prefs, token, watching)
+                    runOnUiThread { buildEvents.addAll(ev); deliverBuildEvents() }
+                } else runOnUiThread { deliverBuildEvents() }
+            } catch (_: Exception) {}
+            Thread.sleep(90000)
+        }
+    }
+    /** Posts each build turn into its project's chat, waiting while another project's chat is replying. */
+    private fun deliverBuildEvents() {
+        if (!::projPane.isInitialized) return
+        while (buildEvents.isNotEmpty()) {
+            val e = buildEvents.first()
+            val p = Store.project(e.project) ?: run { buildEvents.removeFirst(); null } ?: continue
+            if (projPane.conv.project != p.id) {
+                if (projPane.isBusy()) return
+                openProject = p
+                projPane.open(Store.projectChats(p.id).firstOrNull() ?: Store.newConv(p.id))
+                if (curTab == 2) showLayer(2)
+            }
+            buildEvents.removeFirst()
+            val what = if (e.prompt.contains(" passed on ")) "Testing the new build" else if (e.prompt.contains(" failed again ")) "Build still failing" else "Build failed, fixing it"
+            android.widget.Toast.makeText(this, "$what in ${p.name}", android.widget.Toast.LENGTH_LONG).show()
+            projPane.autoSend(e.prompt)
+        }
+    }
+
+    private fun buildSettings(p: Project) {
+        val pad = dp(20)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, dp(8), pad, 0) }
+        fun field(v: String, h: String) = EditText(this).apply { setText(v); hint = h; setTextColor(fg); setHintTextColor(muted); setSingleLine(); background = round(surface2, 12); setPadding(dp(14), dp(10), dp(14), dp(10)) }
+        val repoF = field(Builds.repo(prefs, p.id), "owner/repo")
+        val brF = field(Builds.branch(prefs, p.id), "Branch (blank = all)")
+        val fixS = Switch(this).apply { text = "Auto-fix failed builds"; setTextColor(fg); isChecked = Builds.fix(prefs, p.id) }
+        val testS = Switch(this).apply { text = "Test each build that passes"; setTextColor(fg); isChecked = Builds.test(prefs, p.id) }
+        box.addView(repoF); box.addView(brF, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(8) })
+        box.addView(fixS, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(10) }); box.addView(testS)
+        box.addView(text("Checks every 90 seconds while the app is open, using your GitHub token from Settings. A failed build's errors go to this project's chat, and the model fixes, commits, pushes and restarts it, up to ${Builds.MAX} times in a row. Typing in the project resets the count. Use a model that's good with tools, like qwen3." +
+            (if (!GitHubMcp.has(this)) "\n\nAdd your GitHub token in Settings first." else ""), 12f, muted).apply { setPadding(0, dp(10), 0, 0) })
+        AlertDialog.Builder(this, dialogStyle).setTitle("GitHub builds").setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                val r = repoF.text.toString().trim(); val old = Builds.repo(prefs, p.id)
+                prefs.edit().putString("ciRepo_${p.id}", r).putString("ciBranch_${p.id}", brF.text.toString().trim())
+                    .putBoolean("ciFix_${p.id}", fixS.isChecked).putBoolean("ciTest_${p.id}", testS.isChecked).putInt("ciTries_${p.id}", 0)
+                    .apply { if (r != old) { putLong("ciLast_${p.id}", 0); putString("ciStatus_${p.id}", "") } }.apply()
+                showProjectDetail(p)
+            }
+            .setNeutralButton("Stop watching") { _, _ -> prefs.edit().putString("ciRepo_${p.id}", "").putLong("ciLast_${p.id}", 0).putString("ciStatus_${p.id}", "").apply(); showProjectDetail(p) }
+            .setNegativeButton("Cancel", null).show()
+    }
 
     private fun pollStatus() = thread {
         while (alive) {

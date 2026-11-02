@@ -541,6 +541,29 @@ async fn github_api(app: AppHandle, method: String, path: String, body: Option<S
     }).await.map_err(|e| e.to_string())?
 }
 
+/// A GitHub Actions job's log (build watcher). GitHub answers with a short-lived link to the file, fetched without the token.
+#[tauri::command]
+async fn github_job_log(app: AppHandle, repo: String, job: u64) -> Result<String, String> {
+    let token = std::fs::read_to_string(github_token_file(&app)).map(|s| s.trim().to_string()).unwrap_or_default();
+    if token.is_empty() { return Err("no GitHub token".into()); }
+    if repo.chars().any(|c| !(c.is_ascii_alphanumeric() || "-_./".contains(c))) { return Err("bad repo".into()); }
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(60)).build();
+        let r = agent.get(&format!("https://api.github.com/repos/{repo}/actions/jobs/{job}/logs"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Accept", "application/vnd.github+json")
+            .set("User-Agent", "TheClaww-builds").call();
+        let loc = match r {
+            Ok(r) if (300..400).contains(&r.status()) => r.header("location").map(|s| s.to_string()),
+            Ok(r) => return r.into_string().map_err(|e| e.to_string()),
+            Err(ureq::Error::Status(code, r)) if (300..400).contains(&code) => r.header("location").map(|s| s.to_string()),
+            Err(ureq::Error::Status(code, _)) => return Err(format!("HTTP {code}")),
+            Err(e) => return Err(e.to_string()),
+        }.ok_or("no log link")?;
+        ureq::get(&loc).timeout(std::time::Duration::from_secs(60)).call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// Open a web link in the default browser.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -838,7 +861,7 @@ fn main() {
             allow_microphone(_app);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, gpu_info, keep_awake, fix_ollama_service, github_status, github_set, github_api, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, gpu_info, keep_awake, fix_ollama_service, github_status, github_set, github_api, github_job_log, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }
