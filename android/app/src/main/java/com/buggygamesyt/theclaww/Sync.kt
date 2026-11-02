@@ -66,7 +66,14 @@ object Sync {
     private fun put(t: String, o: String, path: String, data: JSONObject, sha: String?) {
         val b = JSONObject().put("message", "sync $path").put("content", b64e(data.toString()))
         if (sha != null) b.put("sha", sha)
-        api(t, "PUT", "/repos/$o/$REPO/contents/$path", b)
+        try { api(t, "PUT", "/repos/$o/$REPO/contents/$path", b) }
+        catch (e: HttpErr) {
+            // The file is already there (an earlier sync stopped halfway, or another device wrote it): use its current version.
+            if (e.code != 422 && e.code != 409) throw e
+            if (path == "index.json") throw e
+            val cur = file(t, o, path).sha ?: throw e
+            api(t, "PUT", "/repos/$o/$REPO/contents/$path", b.put("sha", cur))
+        }
     }
 
     private fun owner(t: String, p: SharedPreferences): String {

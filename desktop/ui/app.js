@@ -850,7 +850,15 @@ const Sync = {
     catch (e) { if (String(e).startsWith("HTTP 404")) return { sha: null, data: null }; throw e; }
   },
   async put(owner, path, data, sha) {
-    const r = JSON.parse(await this.api("PUT", `/repos/${owner}/${this.REPO}/contents/${path}`, { message: "sync " + path, content: b64e(JSON.stringify(data)), ...(sha ? { sha } : {}) }));
+    const body = { message: "sync " + path, content: b64e(JSON.stringify(data)), ...(sha ? { sha } : {}) };
+    let r;
+    try { r = JSON.parse(await this.api("PUT", `/repos/${owner}/${this.REPO}/contents/${path}`, body)); }
+    catch (e) {
+      // The file is already there (an earlier sync stopped halfway, or another device wrote it): use its current version.
+      if (!/^HTTP (409|422)/.test(String(e)) || path === "index.json") throw e;
+      const cur = (await this.file(owner, path)).sha; if (!cur) throw e;
+      r = JSON.parse(await this.api("PUT", `/repos/${owner}/${this.REPO}/contents/${path}`, { ...body, sha: cur }));
+    }
     return r.content && r.content.sha;
   },
   async owner() {
