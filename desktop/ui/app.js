@@ -1955,8 +1955,9 @@ function openModels() {
     if (DL.jobs.some(j => j.state === "done")) refreshInstalled();
   }
   async function refreshInstalled() { try { installed = new Set((JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).map(m => normName(m.name))); } catch {} }
+  const shownIds = new Set(); // across "Load more" pages, so a catalog that repeats a page doesn't show twice
   async function load(reset) {
-    const g = ++gen; if (reset) { page = 0; results.innerHTML = ""; renderPicks(); } else page++;
+    const g = ++gen; if (reset) { page = 0; shownIds.clear(); results.innerHTML = ""; renderPicks(); } else page++;
     more.classList.add("hidden"); statusV.textContent = "Loading…"; statusV.classList.remove("hidden");
     const modes = [newest ? true : null, best ? false : null].filter(m => m !== null); if (!modes.length) modes.push(true);
     let hasMore = false, err = null; const seenIds = new Set(); const sections = [];
@@ -1968,7 +1969,8 @@ function openModels() {
       sections.push([nw, merged.filter(e => !seenIds.has(e.source + e.id) && seenIds.add(e.source + e.id))]);
     }
     if (g !== gen) return;
-    sections.forEach(([nw, l]) => { if (!l.length) return; if (reset || modes.length > 1) results.append(sec((nw ? "Newest" : "Best") + (query ? ` · "${query}"` : " models"))); l.forEach(e => results.append(card(e))); });
+    if (reset) shownIds.clear();
+    sections.forEach(([nw, l]) => { l = l.filter(e => !shownIds.has(e.source + e.id) && shownIds.add(e.source + e.id)); if (!l.length) return; if (reset || modes.length > 1) results.append(sec((nw ? "Newest" : "Best") + (query ? ` · "${query}"` : " models"))); l.forEach(e => results.append(card(e))); });
     const empty = !results.children.length;
     statusV.classList.toggle("hidden", !empty); statusV.textContent = err ? "Couldn't reach the model catalogs: " + err : "Nothing found. Try another word.";
     more.classList.toggle("hidden", !hasMore);

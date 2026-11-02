@@ -2098,6 +2098,7 @@ class MainActivity : Activity() {
         val dlg = android.app.Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
         var source = prefs.getString("modelSource", "all")!!; var newest = prefs.getBoolean("modelNewest", true); var popular = prefs.getBoolean("modelPopular", false)
         var query = ""; var page = 0; var gen = 0
+        val shownIds = HashSet<String>() // across "Load more" pages, so a repeated page doesn't show twice
         val selected = LinkedHashMap<String, Long>()
         var installed = setOf<String>()
         val newSet = prefs.getStringSet("newModels", emptySet())!!.toSet()
@@ -2264,12 +2265,14 @@ class MainActivity : Activity() {
                 }
                 runOnUiThread {
                     if (g != gen) return@runOnUiThread
-                    sections.forEach { (nw, list) ->
+                    if (reset) shownIds.clear()
+                    sections.forEach { (nw, all) ->
+                        val list = all.filter { shownIds.add(it.source + ":" + it.id) }
                         if (list.isEmpty()) return@forEach
                         if (reset || modes.size > 1) results.addView(section((if (nw) "Newest" else "Best") + if (q.isEmpty()) " models" else " · \"$q\""))
                         list.forEach { results.addView(entryCard(it)) }
                     }
-                    val empty = sections.all { it.second.isEmpty() } && results.childCount == 0
+                    val empty = results.childCount == 0
                     statusV.visibility = if (empty) View.VISIBLE else View.GONE
                     statusV.text = if (err != null) "Couldn't reach the model catalogs: $err" else "Nothing found. Try another word."
                     more.visibility = if (hasMore) View.VISIBLE else View.GONE
