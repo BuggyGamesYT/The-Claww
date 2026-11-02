@@ -696,7 +696,7 @@ const Advisor = {
     const m = msg.toLowerCase();
     if (names.some(n => /\.(kt|java|rs|py|js|ts|c|cpp|h|go|sh|html|css|sql|json|xml|ya?ml|toml|ps1|bat)$/i.test(n)) || m.includes("```") ||
       /\b(code|coding|function|bug|debug|stack ?trace|compile|compiler|python|kotlin|java|rust|javascript|typescript|c\+\+|golang|sql|regex|api|script|bash|shell|html|css|refactor|unit test|git|gradle|npm|cargo|class|method|variable|exception|segfault|syntax)\b/.test(m)) return "code";
-    if (/\b(math|solve|calculate|compute|prove|proof|equation|algebra|calculus|integral|derivative|probability|statistics|logic|puzzle|riddle|step by step|reason|how many|percent)\b/.test(m) || /\d+\s*[-+*/^×÷]\s*\d+/.test(m)) return "reason";
+    if (/\b(math|solve|calculate|compute|prove|proof|equation|algebra|calculus|integral|derivative|probability|statistics|logic|puzzle|riddle|step by step|reason|how many|percent)\b/.test(m) || /\d+\s*[-+*/^×÷xX]\s*\d+/.test(m) || /\d\s+(times|multiplied by|divided by|plus|minus|over|mod|to the power of|squared|cubed)\b/.test(m) || /\d\s*=\s*\??\s*$/.test(m)) return "reason";
     if (/\b(write|rewrite|essay|story|poem|lyrics|email|letter|cover letter|blog|article|summari[sz]e|summary|translate|paraphrase|proofread|caption|speech)\b/.test(m)) return "write";
     return "chat";
   },
@@ -757,8 +757,79 @@ const ollamaCrashNote = (m, retried) => `Ollama stopped while running ${m}` + (r
 // Small models often forget they can search: remind them (with today's date) on every tool chat.
 const toolHint = nudge => `Today is ${new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. ` +
   "You can use tools: WebSearch and WebFetch for anything current or online (weather, news, prices, scores, hours, facts you're unsure of), bash for commands and files. Never say you lack internet or real-time access; search instead." +
+  " For weather, WebFetch https://wttr.in/CITY?format=4 (spaces as +, add ?u for °F), which returns plain text." +
+  (GH_ON ? " GitHub: you're signed in as the user. In bash, $GITHUB_TOKEN is set: read repos, files, issues and Actions with curl -s -H \"Authorization: Bearer $GITHUB_TOKEN\" https://api.github.com/... (start with /user and /user/repos), and clone or push with https://x-access-token:$GITHUB_TOKEN@github.com/OWNER/REPO.git. Never print the token. Ask before pushing, deleting or changing anything on GitHub." : "") +
   (nudge ? " Your last answer said you couldn't look this up. You can: call WebSearch now, then answer from the results." : "") + "\n\n";
+let GH_ON = false;
 const saysNoWeb = t => /(real[- ]time|up[- ]to[- ]date|current) (weather|data|information|info|news|prices?)|(don'?t|do not|can'?t|cannot|unable to) (have )?(access|browse|search|check|look up|retrieve)[^.]{0,40}(internet|web|online|real[- ]time|external|current)|as an ai[^.]{0,40}(no|not|don'?t)[^.]{0,30}(internet|real[- ]time)/i.test(String(t || ""));
+
+// ---------- exact calculator: plain arithmetic is answered by the app (models guess at big numbers) ----------
+const Calc = {
+  gcd(a, b) { a = a < 0n ? -a : a; b = b < 0n ? -b : b; while (b) [a, b] = [b, a % b]; return a; },
+  q(n, d = 1n) { if (d === 0n) throw new Error("div0"); if (d < 0n) { n = -n; d = -d; } const g = this.gcd(n, d) || 1n; return [n / g, d / g]; },
+  norm(text) {
+    let s = " " + String(text).toLowerCase().replace(/[\u2212\u2013]/g, "-") + " ";
+    s = s.replace(/^\s*(?:hey\s+|ok\s+|so\s+)?(?:please\s+)?(?:can you\s+)?(?:tell me\s+)?(?:what(?:'s| is)|whats|calculate|compute|solve|work out|how much is|evaluate)\s+/, " ");
+    for (let i = 0; i < 3; i++) s = s.replace(/\s*(?:\?|\.|!|=|equals?|equal to|is what|math|in math|exactly)\s*$/, " ");
+    s = s.replace(/(\d),(?=\d{3}\b)/g, "$1")
+      .replace(/\bmultiplied by\b|\btimes\b/g, "*").replace(/\bdivided by\b|\bover\b/g, "/").replace(/\bplus\b|\badded to\b/g, "+").replace(/\bminus\b/g, "-")
+      .replace(/\bto the power of\b|\bto the\b|\braised to\b/g, "^").replace(/\bsquared\b/g, "^2").replace(/\bcubed\b/g, "^3").replace(/\bmod(?:ulo)?\b/g, "%")
+      .replace(/[×xX✕]/g, "*").replace(/÷/g, "/").replace(/\*\*/g, "^");
+    s = s.trim();
+    if (!/^[\d.\s+\-*/%^()]+$/.test(s) || !/\d\s*[+\-*/%^]\s*[\d(-]|\)\s*[+\-*/%^]/.test(s)) return null;
+    return s;
+  },
+  eval(s) {
+    const t = s.match(/\d*\.?\d+|[+\-*/%^()]/g) || []; let i = 0;
+    const num = x => { const [a, b = ""] = x.split("."); return this.q(BigInt((a || "0") + b), 10n ** BigInt(b.length)); };
+    const add = (x, y, sg) => this.q(x[0] * y[1] + sg * y[0] * x[1], x[1] * y[1]);
+    const prim = () => {
+      const k = t[i++];
+      if (k === "(") { const v = expr(); if (t[i++] !== ")") throw new Error("paren"); return v; }
+      if (k === "-") { const v = pow(); return [-v[0], v[1]]; }
+      if (k === "+") return pow();
+      if (k && /\d/.test(k)) return num(k);
+      throw new Error("syntax");
+    };
+    const pow = () => {
+      const b = prim();
+      if (t[i] !== "^") return b;
+      i++; const e = pow();
+      if (e[1] !== 1n) throw new Error("frac pow");
+      const n = e[0] < 0n ? -e[0] : e[0];
+      if (n > 100000n || (b[0].toString().length + b[1].toString().length) * Number(n) > 200000) throw new Error("big");
+      const r = this.q(b[0] ** n, b[1] ** n); return e[0] < 0n ? this.q(r[1], r[0]) : r;
+    };
+    const term = () => {
+      let v = pow();
+      while (t[i] === "*" || t[i] === "/" || t[i] === "%") {
+        const op = t[i++], w = pow();
+        if (op === "*") v = this.q(v[0] * w[0], v[1] * w[1]);
+        else if (op === "/") v = this.q(v[0] * w[1], v[1] * w[0]);
+        else { if (v[1] !== 1n || w[1] !== 1n || w[0] === 0n) throw new Error("mod"); v = this.q(((v[0] % w[0]) + w[0]) % w[0]); }
+      }
+      return v;
+    };
+    const expr = () => { let v = term(); while (t[i] === "+" || t[i] === "-") { const op = t[i++]; v = add(v, term(), op === "+" ? 1n : -1n); } return v; };
+    const v = expr(); if (i !== t.length) throw new Error("trailing"); return v;
+  },
+  commas(d) { return d.replace(/\B(?=(\d{3})+(?!\d))/g, ","); },
+  fmt([n, d]) {
+    const neg = n < 0n; if (neg) n = -n;
+    const ip = n / d, sign = neg ? "-" : "";
+    if (d === 1n) return sign + this.commas(ip.toString());
+    let r = n % d, f = "";
+    for (let k = 0; k < 20 && r; k++) { r *= 10n; f += (r / d).toString(); r %= d; }
+    return (r ? "≈ " : "") + sign + this.commas(ip.toString()) + "." + (r ? f : f.replace(/0+$/, ""));
+  },
+  pretty(s) { return s.replace(/\s+/g, "").replace(/\d+(?:\.\d+)?/g, m => { const [a, b] = m.split("."); return this.commas(a.replace(/^0+(?=\d)/, "")) + (b != null ? "." + b : ""); }).replace(/\*/g, " × ").replace(/\//g, " ÷ ").replace(/\+/g, " + ").replace(/(\d|\))-/g, "$1 − ").replace(/%/g, " mod ").replace(/\^/g, "^"); },
+  // The reply for a message that's just arithmetic, or null.
+  reply(text) {
+    const s = this.norm(text); if (!s) return null;
+    try { const v = this.eval(s); const out = this.fmt(v); return `${this.pretty(s)} ${out.startsWith("≈") ? out : "= " + out}`; }
+    catch (e) { return String(e.message) === "div0" ? "That divides by zero, so there's no answer." : null; }
+  },
+};
 
 // ---------- Sync (optional): chats, projects and the Remember list through a private GitHub repo "claww-sync" ----------
 // Same format as the Android app: index.json {v, chats:{id:{title,project,updated}}, projects:[…], deleted:{id:ms}, remember:{list,updated}}
@@ -911,10 +982,11 @@ function rememberSection() {
     Remember.list().forEach((t, i) => list.append(h("div", { class: "row", style: "display:flex;gap:8px;align-items:center;margin:4px 0" },
       h("div", { style: "flex:1" }, t), h("button", { class: "chip", onclick: () => { Remember.remove(i); render(); } }, "Remove"))));
   };
-  const add = () => { const t = input.value.trim(); if (t) { Remember.add(t); input.value = ""; render(); } };
+  const add = () => { const t = input.value.trim(); if (t) { Remember.add(t); input.value = ""; if (!Remember.on()) { P.set("rememberOn", true); sw.querySelector("input").checked = true; } render(); } };
   input.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
   render();
-  return [lbl("Remember"), toggle("Let every chat remember things you tell it (say \"remember that …\", \"forget …\", or add them here)", "rememberOn", false),
+  const sw = toggle("Let every chat remember things you tell it (say \"remember that …\", \"forget …\", or add them here)", "rememberOn", false);
+  return [lbl("Remember"), sw,
     list, h("div", { style: "display:flex;gap:8px;margin-top:6px" }, input, h("button", { class: "chip", onclick: add }, "Add"))];
 }
 
@@ -1290,7 +1362,7 @@ function ChatPane(root, projectMode) {
         return;
       }
     }
-    const memReply = !atts.length && Remember.command(text);
+    const memReply = !atts.length && (Remember.command(text) || Calc.reply(text));
     if (memReply) {
       msgs.push({ u: true, t: text, a: [] }, { u: false, t: memReply });
       if (conv.title === "New chat") { conv.title = text.split("\n")[0].slice(0, 40); setTitle(); }
@@ -1319,7 +1391,8 @@ function ChatPane(root, projectMode) {
       // Photos and video: size the pick to the graphics card when it's known. A vision model that spills out of
       // VRAM with a 16K context is what made Ollama quit (gemma3:12b on an 8 GB card).
       const vr = P.get("vramBytes", 0);
-      if (inst) adv = task === "vision" && vr ? Advisor.advise(task, inst, S.model, vr / 1e9, 1.0) : Advisor.advise(task, inst, S.model, SYS ? SYS.memTotal / 1e9 : 8, 0.75);
+      // Sized to the graphics memory when known: models much bigger than it spill into RAM and crawl (14B on 8 GB).
+      if (inst) adv = vr ? Advisor.advise(task, inst, S.model, vr / 1e9, task === "vision" ? 1.0 : 1.4) : Advisor.advise(task, inst, S.model, SYS ? SYS.memTotal / 1e9 : 8, 0.75);
       if (adv && adv.switchTo && P.get("autoSwitch", false)) { runModel = adv.switchTo; usingNote(runModel); }
     }
     const show = () => { out.textContent = acc.trim() || "…"; list.scrollTop = list.scrollHeight; };
@@ -1425,7 +1498,8 @@ function ChatPane(root, projectMode) {
       }
       const body = (text || "Please look at the attached file(s).") + files;
       const ctx = context(prior);
-      const prompt = toolHint(o.nudge) + Remember.text() + preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
+      const prompt = toolHint(o.nudge) + Remember.text() + preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body)
+        + (/^qwen3[:-]/.test(normName(runModel)) && task !== "reason" ? "\n\n/no_think" : "");
       // claw answers with one JSON line at the end: show only the reply plus a short line per tool used.
       let raw = "";
       thinking();
@@ -1602,7 +1676,7 @@ function taskModelsSection() {
 function githubSection() {
   const st = h("div", { class: "muted", style: "margin-top:6px" }), msg = h("div", { class: "muted", style: "margin-top:4px" });
   const f = h("input", { class: "field", type: "password", placeholder: "Paste a GitHub personal access token", autocomplete: "off", spellcheck: "false" });
-  const paint = async () => { const on = await invoke("github_status").catch(() => false); st.textContent = on ? "Connected · claw can use GitHub." : "Not connected."; clr.classList.toggle("hidden", !on); };
+  const paint = async () => { const on = await invoke("github_status").catch(() => false); GH_ON = !!on; st.textContent = on ? "Connected · claw can use GitHub." : "Not connected."; clr.classList.toggle("hidden", !on); };
   const run = async token => {
     msg.style.color = ""; msg.textContent = "Saving…";
     try { msg.textContent = await invoke("github_set", { token }); f.value = ""; }
@@ -1940,6 +2014,7 @@ let chatPane, projPane;
   if (/127\.0\.0\.1|localhost/.test(S.host) && await invoke("fix_ollama_service").catch(() => false)) await new Promise(r => setTimeout(r, 2500));
   try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", ollamaEnv()).catch(() => {}); }
   invoke("gpu_info").then(g => { if (g && g.vram) P.set("vramBytes", g.vram); }).catch(() => {});
+  invoke("github_status").then(on => { GH_ON = !!on; }).catch(() => {});
   pollStatus(); setInterval(pollStatus, 4000);
   Sync.run(); setInterval(() => Sync.run(), 5 * 60000); addEventListener("focus", () => Sync.run());
   checkNewModels(false); setInterval(() => checkNewModels(false), 30 * 60000);

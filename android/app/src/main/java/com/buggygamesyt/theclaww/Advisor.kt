@@ -30,7 +30,9 @@ object Advisor {
         if (attNames.any { codeExt.containsMatchIn(it.lowercase()) } || m.contains("```") ||
             Regex("\\b(code|coding|function|bug|debug|stack ?trace|compile|compiler|python|kotlin|java|rust|javascript|typescript|c\\+\\+|golang|sql|regex|api|script|bash|shell|html|css|refactor|unit test|git|android studio|gradle|npm|cargo|class|method|variable|exception|segfault|syntax)\\b").containsMatchIn(m)) return "code"
         if (Regex("\\b(math|solve|calculate|compute|prove|proof|equation|algebra|calculus|integral|derivative|probability|statistics|logic|puzzle|riddle|step by step|reason|how many|percent)\\b").containsMatchIn(m) ||
-            Regex("\\d+\\s*[-+*/^×÷]\\s*\\d+").containsMatchIn(m)) return "reason"
+            Regex("\\d+\\s*[-+*/^×÷xX]\\s*\\d+").containsMatchIn(m) ||
+            Regex("\\d\\s+(times|multiplied by|divided by|plus|minus|over|mod|to the power of|squared|cubed)\\b").containsMatchIn(m) ||
+            Regex("\\d\\s*=\\s*\\??\\s*$").containsMatchIn(m)) return "reason"
         if (Regex("\\b(write|rewrite|essay|story|poem|lyrics|email|letter|cover letter|blog|article|summari[sz]e|summary|translate|paraphrase|proofread|caption|speech)\\b").containsMatchIn(m)) return "write"
         return "chat"
     }

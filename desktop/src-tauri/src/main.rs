@@ -78,12 +78,12 @@ fn ensure_dir(path: String) -> Result<String, String> {
 
 /// The tools a chat offers. claw has ~57; their descriptions alone are ~9K tokens, more than Ollama's default 4K memory,
 /// so the start of the list (bash, WebSearch…) got cut off and models said they couldn't search. Offer the everyday ones,
-/// plus PowerShell on Windows and the MCP tool (GitHub) when a GitHub token is set.
+/// plus PowerShell on Windows.
 fn claw_tools() -> String {
     let mut t = vec!["bash", "read_file", "write_file", "edit_file", "glob_search", "grep_search", "WebFetch", "WebSearch", "TodoWrite"];
     if cfg!(windows) { t.push("PowerShell"); }
-    let settings = std::fs::read_to_string(claw_home().join("settings.json")).unwrap_or_default();
-    if settings.contains("mcpServers") && settings.contains("\"github\"") { t.push("MCP"); }
+    // GitHub goes through bash with $GITHUB_TOKEN instead of the MCP tools: GitHub's MCP server adds ~90 tool
+    // descriptions, which overflow a local model's memory the same way.
     t.join(",")
 }
 
@@ -101,6 +101,11 @@ fn claw_run(app: AppHandle, jobs: State<'_, Jobs>, id: String, prompt: String, m
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // GitHub token (Settings › GitHub) for bash: curl to api.github.com and git over https.
+    if let Ok(t) = std::fs::read_to_string(github_token_file(&app)) {
+        let t = t.trim();
+        if !t.is_empty() { cmd.env("GITHUB_TOKEN", t).env("GH_TOKEN", t); }
+    }
     let mut child = no_window(&mut cmd).spawn().map_err(|e| format!("couldn't start claw: {e}"))?;
     let out = child.stdout.take();
     let err = child.stderr.take();

@@ -690,6 +690,7 @@ class MainActivity : Activity() {
         private var cancel: (() -> Unit)? = null
         @Volatile private var stopped = false
         private var busy = false
+        @Volatile private var curTask = "chat"
         fun isBusy() = busy
         fun convIdOrNull(): String? = if (::conv.isInitialized) conv.id else null
 
@@ -1144,7 +1145,7 @@ class MainActivity : Activity() {
 
             val msgs = Store.msgs(conv)
             // Remember (when on): "remember that …", "forget …", "what do you remember" are handled here. Same as desktop.
-            val memReply = if (atts.isEmpty()) Remember.command(prefs, msg) else null
+            val memReply = if (atts.isEmpty()) (Remember.command(prefs, msg) ?: Calc.reply(msg)) else null
             if (memReply != null) {
                 msgs.add(Msg(true, msg)); msgs.add(Msg(false, memReply))
                 if (conv.title == "New chat") { conv.title = msg.lines().first().take(40); title.text = if (mode == null) conv.title else "${project?.name} · ${conv.title}" }
@@ -1183,6 +1184,7 @@ class MainActivity : Activity() {
                 runModel = model
                 val inst = installedModels()
                 val task = Advisor.task(msg, visual.isNotEmpty(), atts.map { it.name })
+                curTask = task
                 val pick = prefs.getString("taskModel_$task", "") ?: ""
                 val picked = pick.takeIf { it.isNotBlank() && (inst == null || inst.any { n -> norm(n) == norm(it) }) }
                 fun usingNote(m: String) = runOnUiThread { outCol.addView(text("Using $m for ${Advisor.LABEL[task]}", 12f, muted).apply { setPadding(dp(6), 0, 0, dp(4)) }, 0) }
@@ -1270,12 +1272,14 @@ class MainActivity : Activity() {
             }
             val ctx = context(prior)
             val body = msg.ifEmpty { "Please look at the attached file(s)." } + files
-            val prompt = ChatGuards.toolHint(nudge) + Remember.text(prefs) + projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body")
+            val prompt = ChatGuards.toolHint(nudge, GitHubMcp.has(this@MainActivity)) + Remember.text(prefs) + projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body") +
+                (if (Regex("^qwen3[:-]").containsMatchIn(Advisor.norm(runModel)) && curTask != "reason") "\n\n/no_think" else "")
             val pb = ProcessBuilder("${applicationInfo.nativeLibraryDir}/libclaw.so", "--model", runModel,
                 "--dangerously-skip-permissions", "--output-format", "json", "--allowedTools", clawTools(), "prompt", prompt).directory(work).redirectErrorStream(true)
             val e = pb.environment(); env(e)
             e["CLAW_CONFIG_HOME"] = File(filesDir, "home/.claw").absolutePath
             e["NO_COLOR"] = "1"; e["TERM"] = "dumb"; e["OLLAMA_HOST"] = host; e["CLAW_TOOL_EVENTS"] = "1"
+            Secrets.get(this@MainActivity, GitHubMcp.TOKEN)?.takeIf { it.isNotBlank() }?.let { e["GITHUB_TOKEN"] = it; e["GH_TOKEN"] = it }
             val p = pb.start(); proc = p; p.outputStream.close()
             // claw answers with one JSON line at the end: show only the reply plus a short line per tool used,
             // never the raw search results / tool output the model reads.
@@ -1406,8 +1410,7 @@ class MainActivity : Activity() {
      *  plus the MCP tool (GitHub) when a GitHub token is set. Same list as desktop. */
     private fun clawTools(): String {
         val t = mutableListOf("bash", "read_file", "write_file", "edit_file", "glob_search", "grep_search", "WebFetch", "WebSearch", "TodoWrite")
-        val settings = try { File(filesDir, "home/.claw/settings.json").readText() } catch (_: Exception) { "" }
-        if (settings.contains("mcpServers") && settings.contains("\"github\"")) t.add("MCP")
+        // GitHub goes through bash with GITHUB_TOKEN instead of GitHub's MCP tools (~90 tool descriptions overflow a local model's memory).
         return t.joinToString(",")
     }
 
@@ -1938,7 +1941,8 @@ class MainActivity : Activity() {
         box.addView(progress); box.addView(pullStatus)
         // Remember (optional): facts every chat knows. Same as desktop.
         box.addView(label("Remember"))
-        box.addView(Switch(this).apply {
+        lateinit var remSw: Switch
+        box.addView(Switch(this).also { remSw = it }.apply {
             text = "Let every chat remember things you tell it (say \"remember that …\", \"forget …\", or add them here)"; setTextColor(fg); isChecked = Remember.on(prefs)
             setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("rememberOn", on).apply() }
         })
@@ -1959,7 +1963,7 @@ class MainActivity : Activity() {
         box.addView(LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(10))
             addView(remField, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            addView(chip("Add") { remField.text.toString().trim().takeIf { it.isNotEmpty() }?.let { Remember.add(prefs, it); remField.setText(""); renderRem() } },
+            addView(chip("Add") { remField.text.toString().trim().takeIf { it.isNotEmpty() }?.let { Remember.add(prefs, it); remField.setText(""); if (!Remember.on(prefs)) remSw.isChecked = true; renderRem() } },
                 LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
         })
         // GitHub: a personal access token lets claw work with your repos, issues and pull requests (GitHub's MCP server).
