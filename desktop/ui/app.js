@@ -752,6 +752,42 @@ const toolHint = nudge => `Today is ${new Date().toLocaleDateString(undefined, {
   (nudge ? " Your last answer said you couldn't look this up. You can: call WebSearch now, then answer from the results." : "") + "\n\n";
 const saysNoWeb = t => /(real[- ]time|up[- ]to[- ]date|current) (weather|data|information|info|news|prices?)|(don'?t|do not|can'?t|cannot|unable to) (have )?(access|browse|search|check|look up|retrieve)[^.]{0,40}(internet|web|online|real[- ]time|external|current)|as an ai[^.]{0,40}(no|not|don'?t)[^.]{0,30}(internet|real[- ]time)/i.test(String(t || ""));
 
+// ---------- Remember (optional): facts the user asks every chat to know ----------
+const Remember = {
+  on: () => P.get("rememberOn", false),
+  list: () => P.get("remember", []) || [],
+  add(t) { const l = this.list(); if (!l.some(x => x.toLowerCase() === t.toLowerCase())) { l.push(t); P.set("remember", l); } },
+  remove(i) { const l = this.list(); l.splice(i, 1); P.set("remember", l); },
+  forget(q) { const l = this.list(), k = l.filter(x => !x.toLowerCase().includes(q.toLowerCase())); P.set("remember", k); return l.length - k.length; },
+  text() { const l = this.list(); return this.on() && l.length ? "Things the user asked you to remember (use them when they matter, don't recite them):\n" + l.map(x => "- " + x).join("\n") + "\n\n" : ""; },
+  // "remember that …" / "forget …" / "what do you remember" typed in a chat, when Remember is on. Returns the reply, or null.
+  command(text) {
+    if (!this.on()) return null;
+    let m = text.match(/^(?:please\s+)?(?:can you\s+)?remember(?:\s+that)?\s*[:,\-]?\s+([\s\S]+)$/i);
+    if (m) { const t = m[1].trim().replace(/[.!]+$/, ""); if (t) { this.add(t); return `Got it. I'll remember that ${t.replace(/^i /i, "you ").replace(/^my /i, "your ")}.`; } }
+    m = text.match(/^(?:please\s+)?forget(?:\s+that)?(?:\s+about)?\s+([\s\S]+)$/i);
+    if (m) { const q = m[1].trim().replace(/[.!]+$/, ""); const n = this.forget(q); return n ? `Done, I forgot ${n === 1 ? "that" : n + " things"}.` : `I don't have anything saved about "${q}".`; }
+    if (/^what do you remember\b|^what have you remembered\b|^what do you know about me\b/i.test(text)) {
+      const l = this.list(); return l.length ? "Here's what I remember:\n" + l.map(x => "• " + x).join("\n") : "Nothing yet. Say \"remember that …\" and I'll keep it for every chat.";
+    }
+    return null;
+  },
+};
+function rememberSection() {
+  const list = h("div");
+  const input = h("input", { type: "text", style: "flex:1", placeholder: "Add something to remember, like: my name is Buggy" });
+  const render = () => {
+    list.innerHTML = "";
+    Remember.list().forEach((t, i) => list.append(h("div", { class: "row", style: "display:flex;gap:8px;align-items:center;margin:4px 0" },
+      h("div", { style: "flex:1" }, t), h("button", { class: "chip", onclick: () => { Remember.remove(i); render(); } }, "Remove"))));
+  };
+  const add = () => { const t = input.value.trim(); if (t) { Remember.add(t); input.value = ""; render(); } };
+  input.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
+  render();
+  return [lbl("Remember"), toggle("Let every chat remember things you tell it (say \"remember that …\", \"forget …\", or add them here)", "rememberOn", false),
+    list, h("div", { style: "display:flex;gap:8px;margin-top:6px" }, input, h("button", { class: "chip", onclick: add }, "Add"))];
+}
+
 async function installedModels() { try { return (JSON.parse(await invoke("http_get", { url: S.host + "/api/tags" })).models || []).map(m => m.name); } catch { return null; } }
 
 // ---------- What each model can do (Ollama /api/show "capabilities"), cached per model + digest ----------
@@ -1123,6 +1159,12 @@ function ChatPane(root, projectMode) {
         return;
       }
     }
+    const memReply = !atts.length && Remember.command(text);
+    if (memReply) {
+      msgs.push({ u: true, t: text, a: [] }, { u: false, t: memReply });
+      if (conv.title === "New chat") { conv.title = text.split("\n")[0].slice(0, 40); setTitle(); }
+      Store.saveConv(conv, msgs); bubble(text, true); bubble(memReply, false); return;
+    }
     const prior = msgs.slice();
     const um = { u: true, t: text, a: atts }; msgs.push(um);
     if (conv.title === "New chat") { conv.title = (text || atts[0].name).split("\n")[0].slice(0, 40); setTitle(); }
@@ -1199,7 +1241,7 @@ function ChatPane(root, projectMode) {
       if (visual.length && !images.length) notes += "\n(No images reached you this time. Don't claim you can't see images in general; just say this file couldn't be read.)";
       for (const a of atts.filter(x => !visual.includes(x)))
         notes += isText(a.name, a.mime) ? `\n\nAttached file ${a.name}:\n\`\`\`\n${await invoke("read_text", { path: a.path, max: 20000 })}\n\`\`\`` : `\n(Also attached: ${a.name}, ${a.mime})`;
-      const messages = [{ role: "system", content: (DIRECT_PERSONA + "\n\n" + preamble() + (o.plain ? "\n\n" + PLAIN_WORDS : "")).trim() }];
+      const messages = [{ role: "system", content: (DIRECT_PERSONA + "\n\n" + Remember.text() + preamble() + (o.plain ? "\n\n" + PLAIN_WORDS : "")).trim() }];
       hist.forEach(m => messages.push({ role: m.u ? "user" : "assistant", content: m.t }));
       const um2 = { role: "user", content: (text || (visual.length ? "What's in this?" : "Please look at the attached file(s).")) + notes };
       if (images.length) um2.images = images;
@@ -1252,7 +1294,7 @@ function ChatPane(root, projectMode) {
       }
       const body = (text || "Please look at the attached file(s).") + files;
       const ctx = context(prior);
-      const prompt = toolHint(o.nudge) + preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
+      const prompt = toolHint(o.nudge) + Remember.text() + preamble() + (ctx ? `Earlier in this conversation:\n${ctx}\nNew message from the user:\n${body}` : body);
       // claw answers with one JSON line at the end: show only the reply plus a short line per tool used.
       let raw = "";
       thinking();
@@ -1489,6 +1531,7 @@ function openSettings() {
     ...memorySection(() => host.value.trim() || S.host), pull, prog, pst,
     h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama", ollamaEnv()).then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
     h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"),
+    ...rememberSection(),
     ...githubSection());
   modal("Settings", body, [["Done", save, true]]);
   refresh();

@@ -1135,6 +1135,13 @@ class MainActivity : Activity() {
             }
 
             val msgs = Store.msgs(conv)
+            // Remember (when on): "remember that …", "forget …", "what do you remember" are handled here. Same as desktop.
+            val memReply = if (atts.isEmpty()) Remember.command(prefs, msg) else null
+            if (memReply != null) {
+                msgs.add(Msg(true, msg)); msgs.add(Msg(false, memReply))
+                if (conv.title == "New chat") { conv.title = msg.lines().first().take(40); title.text = if (mode == null) conv.title else "${project?.name} · ${conv.title}" }
+                Store.saveConv(conv); bubble(msg, true, emptyList()); bubble(memReply, false, emptyList()); return
+            }
             val prior = msgs.toList()
             val um = Msg(true, msg, atts.map { it.path }); msgs.add(um)
             if (conv.title == "New chat") {
@@ -1255,7 +1262,7 @@ class MainActivity : Activity() {
             }
             val ctx = context(prior)
             val body = msg.ifEmpty { "Please look at the attached file(s)." } + files
-            val prompt = ChatGuards.toolHint(nudge) + projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body")
+            val prompt = ChatGuards.toolHint(nudge) + Remember.text(prefs) + projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body")
             val pb = ProcessBuilder("${applicationInfo.nativeLibraryDir}/libclaw.so", "--model", runModel,
                 "--dangerously-skip-permissions", "--output-format", "json", "--allowedTools", clawTools(), "prompt", prompt).directory(work).redirectErrorStream(true)
             val e = pb.environment(); env(e)
@@ -1325,7 +1332,7 @@ class MainActivity : Activity() {
                          else "\n(Also attached: ${a.name}, ${a.mime})"
             }
             val messages = JSONArray()
-            messages.put(JSONObject().put("role", "system").put("content", (DIRECT_PERSONA + "\n\n" + projectPreamble() + (if (plain) "\n\n" + ChatGuards.PLAIN_WORDS else "")).trim()))
+            messages.put(JSONObject().put("role", "system").put("content", (DIRECT_PERSONA + "\n\n" + Remember.text(prefs) + projectPreamble() + (if (plain) "\n\n" + ChatGuards.PLAIN_WORDS else "")).trim()))
             histMsgs.forEach { m -> messages.put(JSONObject().put("role", if (m.user) "user" else "assistant").put("content", m.text)) }
             val um = JSONObject().put("role", "user").put("content", msg.ifEmpty { if (visual.isNotEmpty()) "What's in this?" else "Please look at the attached file(s)." } + notes)
             if (images.length() > 0) um.put("images", images)
@@ -1921,6 +1928,32 @@ class MainActivity : Activity() {
             setOnClickListener { settingsDialog?.dismiss(); openModels() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, dp(44)).apply { topMargin = dp(8) })
         box.addView(progress); box.addView(pullStatus)
+        // Remember (optional): facts every chat knows. Same as desktop.
+        box.addView(label("Remember"))
+        box.addView(Switch(this).apply {
+            text = "Let every chat remember things you tell it (say \"remember that …\", \"forget …\", or add them here)"; setTextColor(fg); isChecked = Remember.on(prefs)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("rememberOn", on).apply() }
+        })
+        val remList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun renderRem() {
+            remList.removeAllViews()
+            Remember.list(prefs).forEachIndexed { i, t ->
+                remList.addView(LinearLayout(this).apply {
+                    gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, dp(4))
+                    addView(TextView(this@MainActivity).apply { text = t; setTextColor(fg); textSize = 14f }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                    addView(chip("Remove") { Remember.remove(prefs, i); renderRem() }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
+                })
+            }
+        }
+        renderRem()
+        box.addView(remList)
+        val remField = field("", "Add something to remember, like: my name is Buggy")
+        box.addView(LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(10))
+            addView(remField, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            addView(chip("Add") { remField.text.toString().trim().takeIf { it.isNotEmpty() }?.let { Remember.add(prefs, it); remField.setText(""); renderRem() } },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(8) })
+        })
         // GitHub: a personal access token lets claw work with your repos, issues and pull requests (GitHub's MCP server).
         box.addView(label("GitHub"))
         val ghStatus = TextView(this).apply { setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, 0) }
