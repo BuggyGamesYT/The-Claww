@@ -35,8 +35,10 @@ jobs:
           [ -z "$up_tag" ] && up_tag=$(git ls-remote --tags --refs https://github.com/ultraworkers/claw-code.git | sed 's#.*refs/tags/##' | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
           ver="${up_tag#v}"; [ -z "$ver" ] && ver=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//')
           # Several Claww builds on the same claw-code version get -2, -3 … in the tag, title and notes.
-          # Always go one past the highest existing build number, so a deleted older tag is never reused.
-          n=$( { gh release list --limit 200 --json tagName -q '.[].tagName' 2>/dev/null; git tag -l; } | sed -n "s/^claww-v${ver//./\\.}\(-\([0-9]\+\)\)\?$/\2/p" | sed 's/^$/1/' | sort -n | tail -1)
+          # Numbers count published releases only: a build that was cancelled or failed never uses one up.
+          # Leftover drafts from such builds are removed first.
+          gh release list --limit 200 --json tagName,isDraft -q '.[] | select(.isDraft) | .tagName' 2>/dev/null | grep "^claww-v${ver}" | while read -r d; do gh release delete "$d" --yes || true; done
+          n=$( { gh release list --exclude-drafts --limit 200 --json tagName -q '.[].tagName' 2>/dev/null; git tag -l; } | sed -n "s/^claww-v${ver//./\\.}\(-\([0-9]\+\)\)\?$/\2/p" | sed 's/^$/1/' | sort -n | tail -1)
           if [ -z "$n" ]; then tag="claww-v${ver}"; label="v${ver}"; else tag="claww-v${ver}-$((n+1))"; label="v${ver}-$((n+1))"; fi
           up=$(git log -1 --format='%h %s' --first-parent origin/main 2>/dev/null || true)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -82,3 +84,15 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "${{ needs.create.outputs.tag }}" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+
+  # A cancelled or failed build deletes its draft, so the next build reuses its number.
+  cleanup:
+    needs: [create, android, desktop, publish]
+    if: ${{ always() && needs.create.outputs.tag != '' && (cancelled() || failure()) }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          t="${{ needs.create.outputs.tag }}"
+          [ "$(gh release view "$t" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null)" = "true" ] && gh release delete "$t" --yes --repo "$GITHUB_REPOSITORY" || true
