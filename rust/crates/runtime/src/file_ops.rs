@@ -368,12 +368,10 @@ fn extract_merge_conflicts(lines: &[&str]) -> Vec<ConflictBlock> {
                 }
 
                 // Check for separator
-                if current.trim() == SEPARATOR {
-                    if separator_line.is_none() {
-                        separator_line = Some(j + 1);
-                        j += 1;
-                        continue;
-                    }
+                if current.trim() == SEPARATOR && separator_line.is_none() {
+                    separator_line = Some(j + 1);
+                    j += 1;
+                    continue;
                 }
 
                 // Check for end marker
@@ -419,13 +417,12 @@ fn extract_merge_conflicts(lines: &[&str]) -> Vec<ConflictBlock> {
 /// Returns the label text (stripped of leading/trailing spaces) if the line matches the prefix,
 /// or None otherwise.
 fn extract_marker_label<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
-    if line.starts_with(prefix) {
-        let rest = &line[prefix.len()..];
+    if let Some(rest) = line.strip_prefix(prefix) {
         // Accept either just the prefix or prefix + single space + label
         if rest.is_empty() {
             Some("")
-        } else if rest.starts_with(' ') {
-            Some(rest[1..].trim())
+        } else if let Some(label) = rest.strip_prefix(' ') {
+            Some(label.trim())
         } else {
             None
         }

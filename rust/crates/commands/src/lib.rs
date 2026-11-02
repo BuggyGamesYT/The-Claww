@@ -7328,8 +7328,8 @@ mod tests {
             .find(|r| r.origin == SkillOrigin::Bundled)
             .expect("should have bundled skills root");
 
-        let loaded_skills =
-            load_skills_from_roots(&[bundled_root.clone()]).expect("should load bundled skills");
+        let loaded_skills = load_skills_from_roots(std::slice::from_ref(bundled_root))
+            .expect("should load bundled skills");
 
         assert!(
             !loaded_skills.is_empty() || bundled_root.path.exists(),
