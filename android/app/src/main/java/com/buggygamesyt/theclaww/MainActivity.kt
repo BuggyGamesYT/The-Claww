@@ -126,6 +126,9 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("claww", Context.MODE_PRIVATE)
         Store.init(filesDir)
+        Store.onChange = { Sync.soon(this) }
+        Sync.isBusy = { (::chatPane.isInitialized && chatPane.isBusy()) || (::projPane.isInitialized && projPane.isBusy()) }
+        Sync.onChanged = { ids -> syncRefresh(ids) }
         val def = if (Build.VERSION.SDK_INT >= 31) "Material You" else "Ember"
         t = allThemes().firstOrNull { it.name == prefs.getString("theme", def) } ?: themes[0]
         window.statusBarColor = bg
@@ -687,6 +690,8 @@ class MainActivity : Activity() {
         private var cancel: (() -> Unit)? = null
         @Volatile private var stopped = false
         private var busy = false
+        fun isBusy() = busy
+        fun convIdOrNull(): String? = if (::conv.isInitialized) conv.id else null
 
         // ---------- Search: icon stretches into a bar. Chat tab = all chats; project chat = this chat only ----------
         private var headMain: View? = null
@@ -1056,7 +1061,10 @@ class MainActivity : Activity() {
                 val row = LinearLayout(this@MainActivity).apply { gravity = if (user) Gravity.END else Gravity.START; setPadding(0, 0, 0, dp(6)) }
                 atts.forEach { p ->
                     val f = File(p)
-                    row.addView(attThumb(p, guessMime(f.name), f.name, dp(110)).apply { setOnClickListener { viewFile(f) } },
+                    // Synced from another device: show its name, the file itself stays there.
+                    val synced = p.startsWith(Store.SYNCED)
+                    row.addView(attThumb(p, if (synced) "application/octet-stream" else guessMime(f.name), f.name, dp(110)).apply { setOnClickListener {
+                        if (synced) android.widget.Toast.makeText(this@MainActivity, "This file is on the device it was sent from. Chats sync, files stay put.", android.widget.Toast.LENGTH_LONG).show() else viewFile(f) } },
                         LinearLayout.LayoutParams(dp(110), dp(110)).apply { leftMargin = dp(6) })
                 }
                 col.addView(HorizontalScrollView(this@MainActivity).apply { isHorizontalScrollBarEnabled = false; addView(row) })
@@ -1986,6 +1994,17 @@ class MainActivity : Activity() {
             setOnClickListener { try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/settings/tokens"))) } catch (_: Exception) {} }
         })
         paintGh()
+        // Sync (optional): chats, projects and Remember through a private GitHub repo. Same as desktop.
+        box.addView(label("Sync chats"))
+        val syncSt = TextView(this).apply { setTextColor(muted); textSize = 12f; setPadding(0, dp(6), 0, dp(10)); text = Sync.status.ifEmpty { if (Sync.on(prefs)) "On." else "Off." } }
+        Sync.onStatus = { syncSt.text = it }
+        box.addView(Switch(this).apply {
+            text = "Sync chats, projects and Remember with your other devices through a private GitHub repo (claww-sync). Uses your GitHub token. Photos and videos stay on the device they came from."
+            setTextColor(fg); isChecked = Sync.on(prefs)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("syncOn", on).apply(); if (on) Sync.run(this@MainActivity, true) else syncSt.text = "Off." }
+        })
+        box.addView(chip("Sync now") { Sync.run(this, true) }, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = dp(8) })
+        box.addView(syncSt)
         fun save() {
             prefs.edit().putBoolean("builtin", sw.isChecked).putString("host", hostF.text.toString().trim())
                 .putString("model", modelF.text.toString().trim()).apply()
@@ -2501,6 +2520,26 @@ class MainActivity : Activity() {
             if (clip != null) for (i in 0 until clip.itemCount) importAttachment(pane, clip.getItemAt(i).uri)
             else data.data?.let { importAttachment(pane, it) }
         }
+    }
+
+    private val syncTick = object : Runnable { override fun run() { Sync.run(this@MainActivity); window.decorView.postDelayed(this, 5 * 60_000L) } }
+    override fun onResume() { super.onResume(); window.decorView.removeCallbacks(syncTick); window.decorView.postDelayed(syncTick, 1500) }
+    override fun onPause() { super.onPause(); window.decorView.removeCallbacks(syncTick) }
+
+    /** After a sync brought changes in: reload open chats that changed and redraw the lists. */
+    private fun syncRefresh(ids: Set<String>) {
+        try {
+            for (pane in listOf(chatPane, projPane)) {
+                val id = pane.convIdOrNull() ?: continue
+                if (id in ids && !pane.isBusy()) {
+                    val c = Store.convs.firstOrNull { it.id == id }
+                    if (c != null) pane.open(c) else if (pane === chatPane) pane.open(Store.newConv(null))
+                }
+            }
+            refreshHome()
+            val op = openProject
+            if (op != null) { val np = Store.project(op.id); if (np != null) showProjectDetail(np) else { openProject = null; showProjectList() } } else showProjectList()
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {

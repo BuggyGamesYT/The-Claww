@@ -471,6 +471,28 @@ fn github_set(app: AppHandle, token: String) -> Result<String, String> {
     }
 }
 
+/// Call GitHub's REST API with the saved token (chat sync). `path` starts with "/". Errors read "HTTP <code>: …".
+#[tauri::command]
+async fn github_api(app: AppHandle, method: String, path: String, body: Option<String>) -> Result<String, String> {
+    let token = std::fs::read_to_string(github_token_file(&app)).map(|s| s.trim().to_string()).unwrap_or_default();
+    if token.is_empty() { return Err("no GitHub token".into()); }
+    if !path.starts_with('/') { return Err("bad path".into()); }
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let req = ureq::request(&method, &format!("https://api.github.com{path}"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Accept", "application/vnd.github+json")
+            .set("X-GitHub-Api-Version", "2022-11-28")
+            .set("User-Agent", "TheClaww-sync")
+            .timeout(std::time::Duration::from_secs(30));
+        let r = match body { Some(b) => req.set("Content-Type", "application/json").send_string(&b), None => req.call() };
+        match r {
+            Ok(r) => r.into_string().map_err(|e| e.to_string()),
+            Err(ureq::Error::Status(code, r)) => Err(format!("HTTP {code}: {}", r.into_string().unwrap_or_default())),
+            Err(e) => Err(e.to_string()),
+        }
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// Open a web link in the default browser.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -768,7 +790,7 @@ fn main() {
             allow_microphone(_app);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, gpu_info, keep_awake, github_status, github_set, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, gpu_info, keep_awake, github_status, github_set, github_api, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }

@@ -22,6 +22,10 @@ object Store {
     private var dir: File? = null
     val convs = mutableListOf<Conv>()
     val projects = mutableListOf<Project>()
+    /** Called after anything changes, so sync can push it (set by MainActivity). */
+    var onChange: (() -> Unit)? = null
+    /** Prefix for attachments synced from another device: the file itself stays there. */
+    const val SYNCED = "@synced/"
 
     fun init(base: File) {
         if (dir != null) return
@@ -44,7 +48,7 @@ object Store {
         } catch (_: Exception) {}
     }
 
-    private fun saveIndex() {
+    @Synchronized fun saveIndex() {
         val a = JSONArray()
         convs.sortedByDescending { it.updated }.forEach {
             a.put(JSONObject().put("id", it.id).put("title", it.title).put("project", it.project ?: JSONObject.NULL).put("updated", it.updated))
@@ -56,6 +60,36 @@ object Store {
         val a = JSONArray()
         projects.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("notes", it.notes).put("updated", it.updated)) }
         File(dir, "projects.json").writeText(a.toString())
+        onChange?.invoke()
+    }
+
+    /** Deleted chat/project ids with when, so sync removes them on other devices too. */
+    @Synchronized fun deleted(): MutableMap<String, Long> {
+        val m = mutableMapOf<String, Long>()
+        try { val o = JSONObject(File(dir, "deleted.json").readText()); o.keys().forEach { m[it] = o.getLong(it) } } catch (_: Exception) {}
+        return m
+    }
+    @Synchronized fun setDeleted(m: Map<String, Long>) { File(dir, "deleted.json").writeText(JSONObject(m as Map<*, *>).toString()) }
+    private fun tomb(id: String) { val m = deleted(); m[id] = System.currentTimeMillis(); setDeleted(m) }
+
+    /** Writes a chat that came from another device, keeping its own [Conv.updated]. */
+    @Synchronized fun putSynced(c: Conv, msgs: List<Msg>) {
+        c.msgs.clear(); c.msgs.addAll(msgs); c.loaded = true
+        if (convs.none { it.id == c.id }) convs.add(0, c)
+        writeMsgs(c); saveIndex()
+    }
+    /** Removes a chat locally because it was deleted on another device. */
+    @Synchronized fun dropSynced(id: String) { convs.removeAll { it.id == id }; File(dir, "c_$id.json").delete(); saveIndex() }
+    @Synchronized fun replaceProjects(l: List<Project>) {
+        projects.clear(); projects.addAll(l)
+        val a = JSONArray()
+        projects.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("notes", it.notes).put("updated", it.updated)) }
+        File(dir, "projects.json").writeText(a.toString())
+    }
+    private fun writeMsgs(c: Conv) {
+        val a = JSONArray()
+        c.msgs.forEach { m -> a.put(JSONObject().put("u", m.user).put("t", m.text).put("a", JSONArray(m.atts)).put("s", m.stopped).put("e", m.error)) }
+        File(dir, "c_${c.id}.json").writeText(a.toString())
     }
 
     fun msgs(c: Conv): MutableList<Msg> {
@@ -80,19 +114,16 @@ object Store {
     @Synchronized fun saveConv(c: Conv) {
         c.updated = System.currentTimeMillis()
         if (convs.none { it.id == c.id }) convs.add(0, c)
-        val a = JSONArray()
-        c.msgs.forEach { m ->
-            a.put(JSONObject().put("u", m.user).put("t", m.text).put("a", JSONArray(m.atts)).put("s", m.stopped).put("e", m.error))
-        }
-        File(dir, "c_${c.id}.json").writeText(a.toString())
+        writeMsgs(c)
         saveIndex()
         c.project?.let { pid -> projects.firstOrNull { it.id == pid }?.let { it.updated = c.updated; saveProjects() } }
+        onChange?.invoke()
     }
 
     fun deleteConv(c: Conv) {
         convs.removeAll { it.id == c.id }
         File(dir, "c_${c.id}.json").delete()
-        saveIndex()
+        saveIndex(); tomb(c.id); onChange?.invoke()
     }
 
     fun newProject(name: String): Project {
@@ -102,7 +133,7 @@ object Store {
 
     fun deleteProject(p: Project) {
         convs.filter { it.project == p.id }.toList().forEach { deleteConv(it) }
-        projects.removeAll { it.id == p.id }; saveProjects()
+        projects.removeAll { it.id == p.id }; tomb(p.id); saveProjects()
     }
 
     fun project(id: String?) = projects.firstOrNull { it.id == id }

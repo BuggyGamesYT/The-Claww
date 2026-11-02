@@ -26,6 +26,8 @@ const P = {
   get(k, d) { try { const v = localStorage.getItem("claww." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { localStorage.setItem("claww." + k, JSON.stringify(v)); },
 };
+// Deleted chat/project ids with when, so sync removes them on other devices too.
+const tomb = id => { const d = P.get("deleted", {}) || {}; d[id] = Date.now(); P.set("deleted", d); Sync.soon(); };
 const Store = {
   convs: P.get("convs", []),          // {id,title,project,updated}
   projects: P.get("projects", []),    // {id,name,notes,updated}
@@ -33,13 +35,13 @@ const Store = {
   saveConv(c, msgs) {
     c.updated = Date.now();
     if (!this.convs.find(x => x.id === c.id)) this.convs.unshift(c);
-    P.set("c_" + c.id, msgs); P.set("convs", this.convs);
+    P.set("c_" + c.id, msgs); P.set("convs", this.convs); Sync.soon();
     const p = this.project(c.project); if (p) { p.updated = c.updated; this.saveProjects(); }
   },
-  deleteConv(c) { this.convs = this.convs.filter(x => x.id !== c.id); localStorage.removeItem("claww.c_" + c.id); P.set("convs", this.convs); },
-  saveProjects() { P.set("projects", this.projects); },
+  deleteConv(c) { this.convs = this.convs.filter(x => x.id !== c.id); localStorage.removeItem("claww.c_" + c.id); P.set("convs", this.convs); tomb(c.id); },
+  saveProjects() { P.set("projects", this.projects); Sync.soon(); },
   newProject(name) { const p = { id: uid(), name: name.trim() || "Untitled project", notes: "", updated: Date.now() }; this.projects.unshift(p); this.saveProjects(); return p; },
-  deleteProject(p) { this.convs.filter(c => c.project === p.id).forEach(c => this.deleteConv(c)); this.projects = this.projects.filter(x => x.id !== p.id); this.saveProjects(); },
+  deleteProject(p) { this.convs.filter(c => c.project === p.id).forEach(c => this.deleteConv(c)); this.projects = this.projects.filter(x => x.id !== p.id); this.saveProjects(); tomb(p.id); },
   project(id) { return this.projects.find(p => p.id === id); },
   newConv(project) { return { id: uid(), title: "New chat", project: project || null, updated: Date.now() }; },
   regular() { return this.convs.filter(c => !c.project).sort((a, b) => b.updated - a.updated); },
@@ -564,6 +566,12 @@ function videoPoster(a) {
 }
 function thumb(a, small, onRemove) {
   const t = h("div", { class: "thumb" + (small ? " small" : "") });
+  if (!a.path) { // synced from another device: the file itself stays there
+    t.append(h("div", { class: "ext" }, (extOf(a.name) || "file").toUpperCase().slice(0, 5), h("small", {}, a.name)));
+    t.title = "This file is on your other device";
+    t.onclick = () => modal(a.name, h("div", { class: "muted" }, "This file is on the device it was sent from. Chats sync, files stay put."));
+    return t;
+  }
   if (a.mime.startsWith("image/")) t.append(h("img", { src: fileSrc(a.path) }));
   else if (a.mime.startsWith("video/")) {
     const label = h("div", { class: "ext" }, (extOf(a.name) || "video").toUpperCase().slice(0, 5), h("small", {}, a.name));
@@ -752,12 +760,134 @@ const toolHint = nudge => `Today is ${new Date().toLocaleDateString(undefined, {
   (nudge ? " Your last answer said you couldn't look this up. You can: call WebSearch now, then answer from the results." : "") + "\n\n";
 const saysNoWeb = t => /(real[- ]time|up[- ]to[- ]date|current) (weather|data|information|info|news|prices?)|(don'?t|do not|can'?t|cannot|unable to) (have )?(access|browse|search|check|look up|retrieve)[^.]{0,40}(internet|web|online|real[- ]time|external|current)|as an ai[^.]{0,40}(no|not|don'?t)[^.]{0,30}(internet|real[- ]time)/i.test(String(t || ""));
 
+// ---------- Sync (optional): chats, projects and the Remember list through a private GitHub repo "claww-sync" ----------
+// Same format as the Android app: index.json {v, chats:{id:{title,project,updated}}, projects:[…], deleted:{id:ms}, remember:{list,updated}}
+// and chats/<id>.json {id,title,project,updated,msgs:[{u,t,a:[{name,mime}],s,e}]}. Newest copy of each chat wins. Files stay on their device.
+const b64e = s => btoa(unescape(encodeURIComponent(s)));
+const b64d = s => decodeURIComponent(escape(atob(String(s).replace(/\n/g, ""))));
+const Sync = {
+  REPO: "claww-sync", running: false, again: false, timer: null, status: "",
+  on: () => P.get("syncOn", false),
+  soon() { if (!this.on()) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.run(), 4000); },
+  api: (method, path, body) => invoke("github_api", { method, path, body: body == null ? null : JSON.stringify(body) }),
+  async file(owner, path) {
+    try { const j = JSON.parse(await this.api("GET", `/repos/${owner}/${this.REPO}/contents/${path}`)); return { sha: j.sha, data: JSON.parse(b64d(j.content)) }; }
+    catch (e) { if (String(e).startsWith("HTTP 404")) return { sha: null, data: null }; throw e; }
+  },
+  async put(owner, path, data, sha) {
+    const r = JSON.parse(await this.api("PUT", `/repos/${owner}/${this.REPO}/contents/${path}`, { message: "sync " + path, content: b64e(JSON.stringify(data)), ...(sha ? { sha } : {}) }));
+    return r.content && r.content.sha;
+  },
+  async owner() {
+    let o = P.get("syncOwner", "");
+    if (!o) { o = JSON.parse(await this.api("GET", "/user")).login; P.set("syncOwner", o); }
+    try { await this.api("GET", `/repos/${o}/${this.REPO}`); }
+    catch (e) {
+      if (!String(e).startsWith("HTTP 404")) throw e;
+      await this.api("POST", "/user/repos", { name: this.REPO, private: true, auto_init: true, description: "The Claww chat sync (private)" });
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    return o;
+  },
+  busyNow: () => [chatPane, projPane].some(p => p && p.isBusy && p.isBusy()),
+  async run(manual) {
+    if (!this.on() && !manual) return;
+    if (this.running) { this.again = true; return; }
+    if (this.busyNow()) { this.soon(); return; }
+    this.running = true; this.set("Syncing…");
+    try { const n = await this.once(); this.set(`Synced ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` + (n ? ` · ${n} updated here` : "")); }
+    catch (e) {
+      const m = String(e);
+      this.set(m.includes("no GitHub token") ? "Add a GitHub token first." : m.startsWith("HTTP 401") ? "GitHub didn't accept the token." : m.startsWith("HTTP 403") || m.startsWith("HTTP 404") ? "The token needs the repo scope." : "Couldn't sync: " + m.slice(0, 120));
+    }
+    this.running = false;
+    if (this.again) { this.again = false; this.soon(); }
+  },
+  set(t) { this.status = t; this.onStatus && this.onStatus(t); },
+  async once(retry = true) {
+    const o = await this.owner();
+    const idx = await this.file(o, "index.json");
+    const R = idx.data || { v: 1, chats: {}, projects: [], deleted: {}, remember: { list: [], updated: 0 } };
+    R.chats = R.chats || {}; R.projects = R.projects || []; R.deleted = R.deleted || {}; R.remember = R.remember || { list: [], updated: 0 };
+    const del = { ...(R.deleted), ...(P.get("deleted", {}) || {}) };
+    for (const [k, v] of Object.entries(R.deleted)) del[k] = Math.max(v, del[k] || 0);
+    let changedHere = 0, openChanged = [];
+    // deletions
+    for (const c of Store.convs.slice()) if (del[c.id] && del[c.id] >= c.updated) { Store.convs = Store.convs.filter(x => x.id !== c.id); localStorage.removeItem("claww.c_" + c.id); changedHere++; openChanged.push(c.id); }
+    for (const id of Object.keys(R.chats)) if (del[id] && del[id] >= R.chats[id].updated) delete R.chats[id];
+    // projects: newest per id
+    const pm = new Map();
+    for (const p of R.projects) if (!(del[p.id] >= p.updated)) pm.set(p.id, p);
+    for (const p of Store.projects) { if (del[p.id] >= p.updated) continue; const r = pm.get(p.id); if (!r || p.updated >= r.updated) pm.set(p.id, p); }
+    const before = JSON.stringify(Store.projects);
+    Store.projects = [...pm.values()].map(p => ({ id: p.id, name: p.name, notes: p.notes || "", updated: p.updated })).sort((a, b) => b.updated - a.updated);
+    if (JSON.stringify(Store.projects) !== before) changedHere++;
+    R.projects = Store.projects;
+    // chats
+    for (const [id, rc] of Object.entries(R.chats)) {
+      const lc = Store.convs.find(c => c.id === id);
+      if (lc && lc.updated >= rc.updated) continue;
+      const f = await this.file(o, `chats/${id}.json`); if (!f.data) continue;
+      const old = lc ? Store.msgs(lc) : [];
+      const msgs = (f.data.msgs || []).map((m, i) => {
+        const prev = old[i];
+        const a = prev && prev.t === m.t && prev.a && prev.a.length ? prev.a : (m.a || []).filter(x => x && x.name).map(x => ({ name: x.name, mime: x.mime || "", path: "" }));
+        return { u: !!m.u, t: m.t || "", a, s: !!m.s, ...(m.e ? { e: true } : {}) };
+      });
+      const c = lc || { id, title: rc.title, project: rc.project || null, updated: rc.updated };
+      c.title = f.data.title || rc.title; c.updated = f.data.updated || rc.updated;
+      if (!lc) Store.convs.unshift(c);
+      P.set("c_" + id, msgs); changedHere++; openChanged.push(id);
+    }
+    for (const c of Store.convs) {
+      if (del[c.id] >= c.updated) continue;
+      const rc = R.chats[c.id];
+      if (rc && rc.updated >= c.updated) continue;
+      const msgs = Store.msgs(c); if (!msgs.length) continue;
+      const data = { id: c.id, title: c.title, project: c.project || null, updated: c.updated,
+        msgs: msgs.map(m => ({ u: m.u, t: m.t, a: (m.a || []).map(a => ({ name: a.name, mime: a.mime })), s: !!m.s, ...(m.e ? { e: true } : {}) })) };
+      const ex = rc ? await this.file(o, `chats/${c.id}.json`) : { sha: null };
+      await this.put(o, `chats/${c.id}.json`, data, ex.sha);
+      R.chats[c.id] = { title: c.title, project: c.project || null, updated: c.updated };
+    }
+    // remember: newest list wins
+    const lAt = P.get("rememberAt", 0);
+    if ((R.remember.updated || 0) > lAt) { P.set("remember", R.remember.list || []); P.set("rememberAt", R.remember.updated); changedHere++; }
+    else R.remember = { list: P.get("remember", []) || [], updated: lAt };
+    const cut = Date.now() - 90 * 86400000; R.deleted = {}; for (const [k, v] of Object.entries(del)) if (v > cut) R.deleted[k] = v;
+    P.set("deleted", R.deleted); P.set("convs", Store.convs); P.set("projects", Store.projects);
+    const next = JSON.stringify(R);
+    if (next !== JSON.stringify(idx.data)) {
+      try { await this.put(o, "index.json", R, idx.sha); }
+      catch (e) { if (retry && /HTTP (409|422)/.test(String(e))) return changedHere + await this.once(false); throw e; }
+    }
+    if (changedHere) this.refreshUi(openChanged);
+    return changedHere;
+  },
+  refreshUi(ids) {
+    for (const pane of [chatPane, projPane]) {
+      if (!pane || !pane.conv) continue;
+      if (ids.includes(pane.conv.id)) {
+        const c = Store.convs.find(x => x.id === pane.conv.id);
+        if (c) pane.open(c); else if (pane === chatPane) pane.open(Store.newConv(null));
+      }
+    }
+    try { renderHome(); if (openProject && !Store.project(openProject.id)) { openProject = null; showProjectList(); } else if (openProject) showProjectDetail(Store.project(openProject.id)); else showProjectList(); } catch {}
+  },
+};
+function syncSection() {
+  const st = h("div", { class: "muted", style: "margin-top:6px" }, Sync.status || (Sync.on() ? "On." : "Off."));
+  Sync.onStatus = t => { st.textContent = t; };
+  return [lbl("Sync chats"), toggle("Sync chats, projects and Remember with your other devices through a private GitHub repo (claww-sync). Uses your GitHub token. Photos and videos stay on the device they came from.", "syncOn", false, v => { if (v) Sync.run(true); else st.textContent = "Off."; }),
+    h("button", { class: "chip", style: "margin-top:8px", onclick: () => Sync.run(true) }, "Sync now"), st];
+}
+
 // ---------- Remember (optional): facts the user asks every chat to know ----------
 const Remember = {
   on: () => P.get("rememberOn", false),
   list: () => P.get("remember", []) || [],
-  add(t) { const l = this.list(); if (!l.some(x => x.toLowerCase() === t.toLowerCase())) { l.push(t); P.set("remember", l); } },
-  remove(i) { const l = this.list(); l.splice(i, 1); P.set("remember", l); },
+  add(t) { const l = this.list(); if (!l.some(x => x.toLowerCase() === t.toLowerCase())) { l.push(t); P.set("remember", l); P.set("rememberAt", Date.now()); Sync.soon(); } },
+  remove(i) { const l = this.list(); l.splice(i, 1); P.set("remember", l); P.set("rememberAt", Date.now()); Sync.soon(); },
   forget(q) { const l = this.list(), k = l.filter(x => !x.toLowerCase().includes(q.toLowerCase())); P.set("remember", k); return l.length - k.length; },
   text() { const l = this.list(); return this.on() && l.length ? "Things the user asked you to remember (use them when they matter, don't recite them):\n" + l.map(x => "- " + x).join("\n") + "\n\n" : ""; },
   // "remember that …" / "forget …" / "what do you remember" typed in a chat, when Remember is on. Returns the reply, or null.
@@ -1058,6 +1188,7 @@ function ChatPane(root, projectMode) {
   setBusy(false);
   root.append(h("div", { class: "pane" }, head, whoRow, list, results, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, micBtn, sendBtn)), picker)));
   self.input = input;
+  self.isBusy = () => busy;
   self.updateBtns = updateBtns;
   self.placeholder = input.placeholder;
   // Words from speech go into the box (after anything already typed).
@@ -1532,7 +1663,8 @@ function openSettings() {
     h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama", ollamaEnv()).then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
     h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"),
     ...rememberSection(),
-    ...githubSection());
+    ...githubSection(),
+    ...syncSection());
   modal("Settings", body, [["Done", save, true]]);
   refresh();
 }
@@ -1808,6 +1940,7 @@ let chatPane, projPane;
   try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", ollamaEnv()).catch(() => {}); }
   invoke("gpu_info").then(g => { if (g && g.vram) P.set("vramBytes", g.vram); }).catch(() => {});
   pollStatus(); setInterval(pollStatus, 4000);
+  Sync.run(); setInterval(() => Sync.run(), 5 * 60000); addEventListener("focus", () => Sync.run());
   checkNewModels(false); setInterval(() => checkNewModels(false), 30 * 60000);
   addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
   // Ctrl+Shift+R: reset wallpaper and glass look (keeps chats and projects).

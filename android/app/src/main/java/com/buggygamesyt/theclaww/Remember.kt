@@ -10,7 +10,7 @@ object Remember {
         val a = try { JSONArray(p.getString("remember", "[]")) } catch (_: Exception) { JSONArray() }
         return (0 until a.length()).map { a.getString(it) }.toMutableList()
     }
-    private fun save(p: SharedPreferences, l: List<String>) = p.edit().putString("remember", JSONArray(l).toString()).apply()
+    private fun save(p: SharedPreferences, l: List<String>) { p.edit().putString("remember", JSONArray(l).toString()).putLong("rememberAt", System.currentTimeMillis()).apply(); Store.onChange?.invoke() }
     fun add(p: SharedPreferences, t: String) { val l = list(p); if (l.none { it.equals(t, true) }) { l.add(t); save(p, l) } }
     fun remove(p: SharedPreferences, i: Int) { val l = list(p); if (i in l.indices) { l.removeAt(i); save(p, l) } }
     fun forget(p: SharedPreferences, q: String): Int { val l = list(p); val k = l.filterNot { it.contains(q, true) }; save(p, k); return l.size - k.size }
