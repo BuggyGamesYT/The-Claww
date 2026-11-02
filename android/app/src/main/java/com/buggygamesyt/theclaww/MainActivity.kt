@@ -871,6 +871,46 @@ class MainActivity : Activity() {
             micGlyph.visibility = if (rec) View.GONE else View.VISIBLE
             micStop.visibility = if (rec) View.VISIBLE else View.GONE
             micBtn.alpha = if (mine && !rec) 0.6f else 1f
+            // While a reply runs: empty box = Stop; something typed = send it (after this reply, or stop and redo).
+            val typed = input.text.isNotBlank() || pending.isNotEmpty()
+            sendArrow.visibility = if (!busy || typed) View.VISIBLE else View.GONE
+            stopSquare.visibility = if (busy && !typed) View.VISIBLE else View.GONE
+        }
+
+        /** Messages sent while a reply was running. redo = stop the reply and answer again with this added. */
+        private class Queued(val msg: String, val atts: List<Att>, val redo: Boolean)
+        private val queue = ArrayDeque<Queued>()
+        private var redoNext = false
+        private var lastAsk = ""
+
+        private fun sendWhileBusy() {
+            val msg = input.text.toString().trim(); val atts = pending.toList()
+            AlertDialog.Builder(this@MainActivity, dialogStyle).setTitle("It's still replying")
+                .setItems(arrayOf("Send after this reply", "Stop and redo with this", "Cancel")) { _, i ->
+                    if (i == 2) return@setItems
+                    input.setText(""); pending.clear(); renderPending(); hideKeyboard()
+                    if (i == 0) {
+                        queue.addLast(Queued(msg, atts, false))
+                        android.widget.Toast.makeText(this@MainActivity, "Queued. It goes out when this reply is done (${queue.size} waiting).", android.widget.Toast.LENGTH_SHORT).show()
+                    } else {
+                        queue.addFirst(Queued(msg, atts, true))
+                        stopped = true
+                        val p = proc; val c = cancel
+                        thread { c?.invoke(); p?.destroy(); Thread.sleep(800); if (p?.isAlive == true) p.destroyForcibly() }
+                    }
+                    updateBtns()
+                }.show()
+        }
+
+        /** After a reply ends, send the next queued message. */
+        private fun drainQueue() {
+            if (busy) return
+            val q = queue.removeFirstOrNull() ?: return
+            val draft = input.text.toString(); val draftAtts = pending.toList()
+            redoNext = q.redo
+            input.setText(q.msg); pending.clear(); pending.addAll(q.atts)
+            onSend()
+            input.setText(draft); pending.clear(); pending.addAll(draftAtts); renderPending(); updateBtns()
         }
 
         /** While speech is busy the box shows what's happening; null puts the normal hint back. */
@@ -1102,19 +1142,19 @@ class MainActivity : Activity() {
 
         private fun setBusy(b: Boolean) {
             busy = b
-            sendArrow.visibility = if (b) View.GONE else View.VISIBLE
-            stopSquare.visibility = if (b) View.VISIBLE else View.GONE
             updateBtns()
         }
 
         fun workDir(): File =
             (if (conv.project != null) File(filesDir, "projects/${conv.project}") else File(filesDir, "workspace")).apply { mkdirs() }
 
-        fun kill() { stopped = true; proc?.destroy(); cancel?.invoke() }
+        fun kill() { queue.clear(); stopped = true; proc?.destroy(); cancel?.invoke() }
 
         fun onSend() {
             // Stop must work even when the input box is empty.
+            if (busy && (input.text.isNotBlank() || pending.isNotEmpty())) { sendWhileBusy(); return }
             if (busy) {
+                queue.clear() // Stop also drops anything waiting
                 stopped = true
                 val p = proc; val c = cancel
                 thread { c?.invoke(); p?.destroy(); Thread.sleep(800); if (p?.isAlive == true) p.destroyForcibly() }
@@ -1149,9 +1189,13 @@ class MainActivity : Activity() {
             if (memReply != null) {
                 msgs.add(Msg(true, msg)); msgs.add(Msg(false, memReply))
                 if (conv.title == "New chat") { conv.title = msg.lines().first().take(40); title.text = if (mode == null) conv.title else "${project?.name} · ${conv.title}" }
-                Store.saveConv(conv); bubble(msg, true, emptyList()); bubble(memReply, false, emptyList()); return
+                Store.saveConv(conv); bubble(msg, true, emptyList()); bubble(memReply, false, emptyList()); input.post { drainQueue() }; return
             }
             val prior = msgs.toList()
+            // Sent with "Stop and redo with this": the model redoes the request it was stopped on, with this added.
+            val redo = redoNext && lastAsk.isNotBlank(); redoNext = false
+            val ask = if (redo) "I stopped your last reply. Do my earlier request again (\"$lastAsk\"), and take this into account: $msg" else msg
+            if (!redo) lastAsk = msg.take(1500)
             val um = Msg(true, msg, atts.map { it.path }); msgs.add(um)
             if (conv.title == "New chat") {
                 conv.title = (msg.ifEmpty { atts.first().name }).lines().first().take(40)
@@ -1196,12 +1240,12 @@ class MainActivity : Activity() {
                     // directly. Everything else goes through claw (web search, files, commands).
                     replyErr = false
                     val noTools = ModelCaps.tools(prefs, host, runModel) == false || !prefs.getBoolean("taskTools_$task", true)
-                    if (visual.isNotEmpty() || noTools) directChat(prior, msg, atts, visual, sb, ::show)
-                    else when (clawChat(prior, msg, atts, sb, ::show)) {
+                    if (visual.isNotEmpty() || noTools) directChat(prior, ask, atts, visual, sb, ::show)
+                    else when (clawChat(prior, ask, atts, sb, ::show)) {
                         // Safety net: the model turned out not to support tools. Remember that and answer directly instead.
-                        CLAW_NO_TOOLS -> if (!stopped) { ModelCaps.markNoTools(prefs, runModel); directChat(prior, msg, atts, visual, sb, ::show) }
+                        CLAW_NO_TOOLS -> if (!stopped) { ModelCaps.markNoTools(prefs, runModel); directChat(prior, ask, atts, visual, sb, ::show) }
                         // It printed a tool call as text (nothing ran): answer again directly, in plain words.
-                        CLAW_TOOL_TEXT -> if (!stopped) directChat(prior, msg, atts, visual, sb, ::show, plain = true)
+                        CLAW_TOOL_TEXT -> if (!stopped) directChat(prior, ask, atts, visual, sb, ::show, plain = true)
                     }
                 } catch (ex: Exception) {
                     if (!stopped) { sb.setLength(0); sb.append("Error: ${ex.message}"); replyErr = true; show() }
@@ -1214,6 +1258,7 @@ class MainActivity : Activity() {
                     runOnUiThread {
                         if (stopped) markStopped(out, partial); setBusy(false)
                         adv?.suggest?.let { e -> if (!stopped) suggestCard(outCol, adv.task, e, adv.switchTo) }
+                        drainQueue()
                     }
                 }
             }

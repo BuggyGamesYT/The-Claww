@@ -1255,8 +1255,28 @@ function ChatPane(root, projectMode) {
     micBtn.classList.toggle("hidden", !showMic); sendBtn.classList.toggle("hidden", showMic);
     micBtn.classList.toggle("rec", mine && Speech.state === "rec");
     micBtn.classList.toggle("wait", mine && Speech.state !== "rec");
+    // While a reply runs: empty box = Stop; something typed = send it (after this reply, or stop and redo).
+    const typed = !!input.value.trim() || pending.length > 0, stopMode = busy && !typed;
+    if (sendBtn.dataset.mode !== String(stopMode)) { sendBtn.dataset.mode = String(stopMode); sendBtn.innerHTML = stopMode ? `<div class="stopsq"></div>` : ARROW; sendBtn.title = stopMode ? "Stop" : "Send"; }
   };
-  const setBusy = b => { busy = b; sendBtn.innerHTML = b ? `<div class="stopsq"></div>` : ARROW; sendBtn.title = b ? "Stop" : "Send"; updateBtns(); };
+  const setBusy = b => { busy = b; updateBtns(); };
+  // Messages sent while a reply was running. redo = stop the reply and answer again with this added.
+  const queue = []; let redoNext = false, lastAsk = "";
+  const sendWhileBusy = () => {
+    const text = input.value.trim(), atts = pending.slice();
+    const take = () => { input.value = ""; input.style.height = "auto"; pending = []; renderPending(); updateBtns(); };
+    menu("It's still replying", [
+      ["Send after this reply", () => { take(); queue.push({ text, atts, redo: false }); list.append(h("div", { class: "muted", style: "font-size:12px;text-align:right;margin:2px 8px" }, `Queued: "${text.slice(0, 60)}" goes out when this reply is done.`)); list.scrollTop = list.scrollHeight; }],
+      ["Stop and redo with this", () => { take(); queue.unshift({ text, atts, redo: true }); stopped = true; if (job) invoke("stop", { id: job }); }],
+    ]);
+  };
+  const drainQueue = () => {
+    if (busy || !queue.length) return;
+    const q = queue.shift(), draft = input.value, draftAtts = pending.slice();
+    redoNext = q.redo; input.value = q.text; pending = q.atts.slice();
+    self.send();
+    input.value = draft; pending = draftAtts; renderPending(); updateBtns();
+  };
   setBusy(false);
   root.append(h("div", { class: "pane" }, head, whoRow, list, results, h("div", { class: "composer-wrap" }, h("div", { class: "composer panel" }, pend, h("div", { class: "bar" }, input, plus, micBtn, sendBtn)), picker)));
   self.input = input;
@@ -1348,8 +1368,9 @@ function ChatPane(root, projectMode) {
   const preamble = () => { const p = project(); return p ? `You are working in the project "${p.name}". The current directory is this project's folder.` + (p.notes ? `\nProject notes:\n${p.notes}` : "") + "\n\n" : ""; };
 
   self.send = async () => {
-    if (busy) { stopped = true; if (job) invoke("stop", { id: job }); return; }
-    const text = input.value.trim(), atts = pending.slice();
+    if (busy && (input.value.trim() || pending.length)) { sendWhileBusy(); return; }
+    if (busy) { queue.length = 0; stopped = true; if (job) invoke("stop", { id: job }); return; }
+    let text = input.value.trim(); const atts = pending.slice();
     if (!text && !atts.length) return;
     input.value = ""; input.style.height = "auto"; pending = []; renderPending(); updateBtns();
     if (!projectMode && !atts.length) {
@@ -1366,13 +1387,17 @@ function ChatPane(root, projectMode) {
     if (memReply) {
       msgs.push({ u: true, t: text, a: [] }, { u: false, t: memReply });
       if (conv.title === "New chat") { conv.title = text.split("\n")[0].slice(0, 40); setTitle(); }
-      Store.saveConv(conv, msgs); bubble(text, true); bubble(memReply, false); return;
+      Store.saveConv(conv, msgs); bubble(text, true); bubble(memReply, false); setTimeout(drainQueue, 0); return;
     }
     const prior = msgs.slice();
     const um = { u: true, t: text, a: atts }; msgs.push(um);
     if (conv.title === "New chat") { conv.title = (text || atts[0].name).split("\n")[0].slice(0, 40); setTitle(); }
     Store.saveConv(conv, msgs);
     bubble(text, true, atts);
+    // Sent with "Stop and redo with this": the model redoes the request it was stopped on, with this added.
+    const redo = redoNext && lastAsk; redoNext = false;
+    if (redo) text = `I stopped your last reply. Do my earlier request again ("${lastAsk}"), and take this into account: ${text}`;
+    else lastAsk = text.slice(0, 1500);
     const out = bubble("…", false);
     const am = { u: false, t: "" }; msgs.push(am);
     setBusy(true); stopped = false;
@@ -1402,6 +1427,7 @@ function ChatPane(root, projectMode) {
       if (stopped) markStopped(out, am.t);
       setBusy(false);
       if (adv && adv.suggest && !stopped) suggestCard(out, adv);
+      setTimeout(drainQueue, 0);
     };
     const visual = atts.filter(a => a.mime.startsWith("image/") || a.mime.startsWith("video/"));
     // Photos/videos, a model that can't use tools, or Tools switched off for this task: chat with Ollama directly.
