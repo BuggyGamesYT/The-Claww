@@ -632,21 +632,12 @@ impl TerminalRenderer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MarkdownStreamState {
     pending: String,
     /// Track whether the last emitted output ended with a newline.
     /// Used to ensure proper spacing when resuming from a buffer.
     last_output_ends_with_newline: bool,
-}
-
-impl Default for MarkdownStreamState {
-    fn default() -> Self {
-        Self {
-            pending: String::new(),
-            last_output_ends_with_newline: false,
-        }
-    }
 }
 
 impl MarkdownStreamState {
@@ -662,16 +653,16 @@ impl MarkdownStreamState {
 
         // If the previous output didn't end with a newline and this chunk starts
         // with a block-level element, ensure proper spacing before it.
-        if !self.last_output_ends_with_newline && !rendered.is_empty() {
-            if stripped.starts_with("\u{256d}\u{2500}")
+        if !self.last_output_ends_with_newline
+            && !rendered.is_empty()
+            && (stripped.starts_with("\u{256d}\u{2500}")
                 || stripped.starts_with("```")
                 || stripped.starts_with("|")
                 || stripped.starts_with("• ")
                 || stripped.starts_with("1. ")
-                || stripped.starts_with("-")
-            {
-                rendered = format!("\n\n{}", rendered);
-            }
+                || stripped.starts_with("-"))
+        {
+            rendered = format!("\n\n{}", rendered);
         }
 
         // When markdown ends with a code block closing marker or other block-level element,
@@ -916,6 +907,7 @@ fn normalize_nested_fences(markdown: &str) -> String {
 /// Safe boundaries are:
 /// - After a closing fence line (when fence is closed)
 /// - After an empty line
+///
 /// This function returns the position of the last safe boundary found.
 fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
     let mut open_fence: Option<FenceMarker> = None;

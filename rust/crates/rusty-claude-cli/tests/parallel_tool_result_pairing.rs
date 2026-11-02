@@ -109,7 +109,7 @@ fn parallel_tool_calls_are_answered_in_one_following_message() {
 }
 
 /// Writes the permission preset the mock harness runs with.
-fn prepare_config_home(config_home: &PathBuf) {
+fn prepare_config_home(config_home: &std::path::Path) {
     fs::write(
         config_home.join("settings.json"),
         json!({ "permissions": { "defaultMode": "read-only" } }).to_string(),

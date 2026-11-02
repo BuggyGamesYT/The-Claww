@@ -886,11 +886,11 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     }
 
     let headers = response.headers().clone();
-    let request_id = request_id_from_headers(&headers);
+    let request_id = request_id_from_headers(&headers).map(String::into_boxed_str);
     let body = response.text().await.unwrap_or_else(|_| String::new());
     let parsed_error = serde_json::from_str::<AnthropicErrorEnvelope>(&body).ok();
     let retryable = is_retryable_status(status);
-    let retry_after = parse_retry_after(&headers, status);
+    let retry_after = parse_retry_after(&headers, status).map(Box::new);
 
     Err(ApiError::Api {
         status,
@@ -1651,7 +1651,7 @@ mod tests {
             status: reqwest::StatusCode::UNAUTHORIZED,
             error_type: Some("authentication_error".to_string()),
             message: Some("Invalid bearer token".to_string()),
-            request_id: Some("req_varleg_001".to_string()),
+            request_id: Some("req_varleg_001".into()),
             body: String::new(),
             retryable: false,
             suggested_action: None,

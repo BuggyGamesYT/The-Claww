@@ -261,7 +261,7 @@ impl OpenAiCompatClient {
                         .and_then(|t| t.as_str())
                         .map(str::to_owned),
                     message: Some(msg),
-                    request_id,
+                    request_id: request_id.map(String::into_boxed_str),
                     body,
                     retryable: false,
                     suggested_action: suggested_action_for_status(
@@ -1653,7 +1653,7 @@ fn parse_sse_frame(
                 request_id: None,
                 body: trimmed.chars().take(200).collect(),
                 retryable: false,
-                suggested_action: Some("verify the API endpoint URL is correct".to_string()),
+                suggested_action: Some("verify the API endpoint URL is correct"),
                 retry_after: None,
             });
         }
@@ -1706,7 +1706,7 @@ fn parse_sse_frame(
             request_id: None,
             body: payload.chars().take(200).collect(),
             retryable: false,
-            suggested_action: Some("verify the API endpoint URL is correct".to_string()),
+            suggested_action: Some("verify the API endpoint URL is correct"),
             retry_after: None,
         });
     }
@@ -1760,11 +1760,11 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     }
 
     let headers = response.headers().clone();
-    let request_id = request_id_from_headers(&headers);
+    let request_id = request_id_from_headers(&headers).map(String::into_boxed_str);
     let body = response.text().await.unwrap_or_default();
     let parsed_error = serde_json::from_str::<ErrorEnvelope>(&body).ok();
     let retryable = is_retryable_status(status);
-    let retry_after = parse_retry_after(&headers, status);
+    let retry_after = parse_retry_after(&headers, status).map(Box::new);
 
     let suggested_action = suggested_action_for_status(status);
 
@@ -1819,14 +1819,14 @@ fn is_retryable_400(status: reqwest::StatusCode, body: &str) -> bool {
 
 /// Generate a suggested user action based on the HTTP status code and error context.
 /// This provides actionable guidance when API requests fail.
-fn suggested_action_for_status(status: reqwest::StatusCode) -> Option<String> {
+fn suggested_action_for_status(status: reqwest::StatusCode) -> Option<&'static str> {
     match status.as_u16() {
-        401 => Some("Check API key is set correctly and has not expired".to_string()),
-        403 => Some("Verify API key has required permissions for this operation".to_string()),
-        413 => Some("Reduce prompt size or context window before retrying".to_string()),
-        429 => Some("Wait a moment before retrying; consider reducing request rate".to_string()),
-        500 => Some("Provider server error - retry after a brief wait".to_string()),
-        502..=504 => Some("Provider gateway error - retry after a brief wait".to_string()),
+        401 => Some("Check API key is set correctly and has not expired"),
+        403 => Some("Verify API key has required permissions for this operation"),
+        413 => Some("Reduce prompt size or context window before retrying"),
+        429 => Some("Wait a moment before retrying; consider reducing request rate"),
+        500 => Some("Provider server error - retry after a brief wait"),
+        502..=504 => Some("Provider gateway error - retry after a brief wait"),
         _ => None,
     }
 }

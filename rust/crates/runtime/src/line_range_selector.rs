@@ -58,6 +58,11 @@ impl LineRange {
         }
     }
 
+    /// Check if this range contains no lines.
+    pub fn is_empty(&self) -> bool {
+        self.start_line > self.end_line
+    }
+
     /// Check if this range is valid.
     pub fn is_valid(&self) -> bool {
         self.start_line > 0 && self.end_line > 0 && self.start_line <= self.end_line
@@ -343,5 +348,14 @@ mod tests {
     fn test_line_range_len() {
         assert_eq!(LineRange::new(50, 200).len(), 151);
         assert_eq!(LineRange::new(50, 50).len(), 1);
+    }
+
+    #[test]
+    fn test_line_range_is_empty() {
+        assert!(LineRange::new(51, 50).is_empty());
+        assert_eq!(LineRange::new(51, 50).len(), 0);
+        assert!(!LineRange::new(50, 50).is_empty());
+        assert!(!LineRange::new(50, 200).is_empty());
+        assert!(!LineRange::new(0, 0).is_empty());
     }
 }

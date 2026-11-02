@@ -56,14 +56,14 @@ pub enum ApiError {
         status: reqwest::StatusCode,
         error_type: Option<String>,
         message: Option<String>,
-        request_id: Option<String>,
+        request_id: Option<Box<str>>,
         body: String,
         retryable: bool,
         /// Suggested user action based on error type (e.g., "Reduce prompt size" for 413)
-        suggested_action: Option<String>,
+        suggested_action: Option<&'static str>,
         /// Parsed Retry-After header value (seconds) for 429 responses.
         /// When present, overrides the exponential backoff delay.
-        retry_after: Option<Duration>,
+        retry_after: Option<Box<Duration>>,
     },
     RetriesExhausted {
         attempts: u32,
@@ -137,7 +137,7 @@ impl ApiError {
     /// over the computed backoff delay when it exists.
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::Api { retry_after, .. } => *retry_after,
+            Self::Api { retry_after, .. } => retry_after.as_deref().copied(),
             Self::RetriesExhausted { last_error, .. } => last_error.retry_after(),
             _ => None,
         }
@@ -532,6 +532,29 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_survives_retry_exhaustion_wrapping() {
+        let delay = std::time::Duration::from_secs(42);
+        let error = ApiError::Api {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            error_type: None,
+            message: None,
+            request_id: Some("retry-trace".into()),
+            body: String::new(),
+            retryable: true,
+            suggested_action: Some("Wait before retrying"),
+            retry_after: Some(Box::new(delay)),
+        };
+        assert_eq!(error.retry_after(), Some(delay));
+        let wrapped = ApiError::RetriesExhausted {
+            attempts: 2,
+            last_error: Box::new(error),
+        };
+        assert_eq!(wrapped.retry_after(), Some(delay));
+        assert_eq!(wrapped.request_id(), Some("retry-trace"));
+        assert!(wrapped.is_retryable());
+    }
+
+    #[test]
     fn detects_generic_fatal_wrapper_and_classifies_it_as_provider_internal() {
         let error = ApiError::Api {
             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
@@ -540,7 +563,7 @@ mod tests {
                 "Something went wrong while processing your request. Please try again, or use /new to start a fresh session."
                     .to_string(),
             ),
-            request_id: Some("req_jobdori_123".to_string()),
+            request_id: Some("req_jobdori_123".into()),
             body: String::new(),
             retryable: true,
             suggested_action: None,
@@ -564,7 +587,7 @@ mod tests {
                     "Something went wrong while processing your request. Please try again, or use /new to start a fresh session."
                         .to_string(),
                 ),
-                request_id: Some("req_nested_456".to_string()),
+                request_id: Some("req_nested_456".into()),
                 body: String::new(),
                 retryable: true,
                 suggested_action: None,
@@ -586,7 +609,7 @@ mod tests {
                 "This model's maximum context length is 200000 tokens, but your request used 230000 tokens."
                     .to_string(),
             ),
-            request_id: Some("req_ctx_123".to_string()),
+            request_id: Some("req_ctx_123".into()),
             body: String::new(),
             retryable: false,
             suggested_action: None,
@@ -607,7 +630,7 @@ mod tests {
                 "Input tokens exceed the configured limit of 922000 tokens. Your messages resulted in 1860900 tokens. Please reduce the length of the messages."
                     .to_string(),
             ),
-            request_id: Some("req_ctx_openai_123".to_string()),
+            request_id: Some("req_ctx_openai_123".into()),
             body: String::new(),
             retryable: false,
             suggested_action: None,
