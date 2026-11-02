@@ -76,11 +76,22 @@ fn ensure_dir(path: String) -> Result<String, String> {
     Ok(path)
 }
 
+/// The tools a chat offers. claw has ~57; their descriptions alone are ~9K tokens, more than Ollama's default 4K memory,
+/// so the start of the list (bash, WebSearch…) got cut off and models said they couldn't search. Offer the everyday ones,
+/// plus PowerShell on Windows and the MCP tool (GitHub) when a GitHub token is set.
+fn claw_tools() -> String {
+    let mut t = vec!["bash", "read_file", "write_file", "edit_file", "glob_search", "grep_search", "WebFetch", "WebSearch", "TodoWrite"];
+    if cfg!(windows) { t.push("PowerShell"); }
+    let settings = std::fs::read_to_string(claw_home().join("settings.json")).unwrap_or_default();
+    if settings.contains("mcpServers") && settings.contains("\"github\"") { t.push("MCP"); }
+    t.join(",")
+}
+
 #[tauri::command]
 fn claw_run(app: AppHandle, jobs: State<'_, Jobs>, id: String, prompt: String, model: String, host: String, cwd: String) -> Result<(), String> {
     let _ = std::fs::create_dir_all(&cwd);
     let mut cmd = Command::new(claw_path());
-    cmd.args(["--model", &model, "--dangerously-skip-permissions", "--output-format", "json", "prompt", &prompt])
+    cmd.args(["--model", &model, "--dangerously-skip-permissions", "--output-format", "json", "--allowedTools", &claw_tools(), "prompt", &prompt])
         .current_dir(&cwd)
         .env("OLLAMA_HOST", &host)
         .env("NO_COLOR", "1")

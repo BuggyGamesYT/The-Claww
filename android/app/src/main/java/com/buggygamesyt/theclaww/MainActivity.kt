@@ -1257,7 +1257,7 @@ class MainActivity : Activity() {
             val body = msg.ifEmpty { "Please look at the attached file(s)." } + files
             val prompt = ChatGuards.toolHint(nudge) + projectPreamble() + (if (ctx.isBlank()) body else "Earlier in this conversation:\n$ctx\nNew message from the user:\n$body")
             val pb = ProcessBuilder("${applicationInfo.nativeLibraryDir}/libclaw.so", "--model", runModel,
-                "--dangerously-skip-permissions", "--output-format", "json", "prompt", prompt).directory(work).redirectErrorStream(true)
+                "--dangerously-skip-permissions", "--output-format", "json", "--allowedTools", clawTools(), "prompt", prompt).directory(work).redirectErrorStream(true)
             val e = pb.environment(); env(e)
             e["CLAW_CONFIG_HOME"] = File(filesDir, "home/.claw").absolutePath
             e["NO_COLOR"] = "1"; e["TERM"] = "dumb"; e["OLLAMA_HOST"] = host; e["CLAW_TOOL_EVENTS"] = "1"
@@ -1385,6 +1385,16 @@ class MainActivity : Activity() {
     }
     private fun ollamaCrashNote(m: String, retried: Boolean) = "Ollama stopped while running $m" + (if (retried) ", even with less memory" else " and didn't come back") +
         ". That almost always means the model plus your photos or video didn't fit in memory. Try a smaller model for this task in Settings › Models for tasks (like gemma3:4b or qwen2.5vl:3b), or lower Memory, then send it again."
+
+    /** The tools a chat offers. claw has ~57; their descriptions alone are ~9K tokens, more than Ollama's default 4K memory,
+     *  so the start of the list (bash, WebSearch…) got cut off and models said they couldn't search. Offer the everyday ones,
+     *  plus the MCP tool (GitHub) when a GitHub token is set. Same list as desktop. */
+    private fun clawTools(): String {
+        val t = mutableListOf("bash", "read_file", "write_file", "edit_file", "glob_search", "grep_search", "WebFetch", "WebSearch", "TodoWrite")
+        val settings = try { File(filesDir, "home/.claw/settings.json").readText() } catch (_: Exception) { "" }
+        if (settings.contains("mcpServers") && settings.contains("\"github\"")) t.add("MCP")
+        return t.joinToString(",")
+    }
 
     private val CLAW_OK = 0
     private val CLAW_NO_TOOLS = 1
