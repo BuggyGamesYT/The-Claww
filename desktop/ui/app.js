@@ -1119,7 +1119,7 @@ function ChatPane(root, projectMode) {
   sBox.firstChild.innerHTML = SEARCH;
   const head = h("div", { class: "pane-head" },
     projectMode ? h("button", { class: "back", onclick: () => openProject ? showProjectDetail(openProject) : showProjectList() }, "‹") : null,
-    h("div", { class: "grow" }, title, h("div", { class: "status", onclick: () => status.ok ? openSettings() : invoke("start_ollama", ollamaEnv()).then(() => setTimeout(pollStatus, 1500)).catch(e => modal("Ollama", h("div", {}, String(e)))) }, dot, stxt)),
+    h("div", { class: "grow" }, title, h("div", { class: "status", onclick: () => status.ok ? openSettings() : invoke("start_ollama", { ...ollamaEnv(), ask: true }).then(() => setTimeout(pollStatus, 1500)).catch(e => modal("Ollama", h("div", {}, String(e)))) }, dot, stxt)),
     sBox,
     projectMode ? null : h("button", { class: "chip", onclick: showHistory }, "Chats"),
     h("button", { class: "chip", onclick: () => { if (!busy) self.open(Store.newConv(projectMode ? conv.project : null)); } }, "New"));
@@ -1660,7 +1660,7 @@ function openSettings() {
     toggle("Suggest a better model to download when one would do the task better", "suggestModels", true, v => { if (v) P.set("noSuggest", []); }), h("div", { class: "muted", style: "margin-top:8px" }, tip),
     ...tasks.els,
     ...memorySection(() => host.value.trim() || S.host), pull, prog, pst,
-    h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama", ollamaEnv()).then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
+    h("button", { class: "chip", style: "margin-top:10px", onclick: () => invoke("start_ollama", { ...ollamaEnv(), ask: true }).then(() => { pst.textContent = "Starting Ollama…"; setTimeout(() => { refresh(); pollStatus(); }, 2000); }).catch(e => pst.textContent = String(e)) }, "Start Ollama on this PC"),
     h("button", { class: "chip", style: "margin:10px 0 0 8px", onclick: () => { closeModal(); openModels(); } }, "Browse & download any model"),
     ...rememberSection(),
     ...githubSection(),
@@ -1937,6 +1937,7 @@ let chatPane, projPane;
   renderHome();
   if (PATHS.clawFound === false) chatPane.input.placeholder = "claw binary missing from this install";
   // Try to start Ollama once if it isn't running locally.
+  if (/127\.0\.0\.1|localhost/.test(S.host) && await invoke("fix_ollama_service").catch(() => false)) await new Promise(r => setTimeout(r, 2500));
   try { await invoke("http_get", { url: S.host + "/api/version" }); } catch { if (/127\.0\.0\.1|localhost/.test(S.host)) invoke("start_ollama", ollamaEnv()).catch(() => {}); }
   invoke("gpu_info").then(g => { if (g && g.vram) P.set("vramBytes", g.vram); }).catch(() => {});
   pollStatus(); setInterval(pollStatus, 4000);

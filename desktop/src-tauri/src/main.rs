@@ -275,6 +275,48 @@ impl OllamaEnv {
     }
 }
 
+/// Linux: is Ollama installed as a system service (models live in the service's own folder, e.g. /var/lib/ollama)?
+#[cfg(target_os = "linux")]
+fn has_ollama_unit() -> bool {
+    Command::new("systemctl").args(["list-unit-files", "ollama.service", "--no-legend"]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("ollama.service")).unwrap_or(false)
+}
+
+/// Linux with the Ollama service: start the service instead of a separate `ollama serve` as this user.
+/// A user-run `ollama serve` looks in ~/.ollama/models, so every downloaded model "disappears", and it holds
+/// port 11434 so the real service can't come back. Some(result) when the service path was taken.
+#[cfg(target_os = "linux")]
+fn start_ollama_service(ask: bool) -> Option<Result<(), String>> {
+    if !has_ollama_unit() { return None; }
+    let ok = |c: &mut Command| c.status().map(|s| s.success()).unwrap_or(false);
+    if ok(Command::new("systemctl").args(["start", "--no-ask-password", "ollama"])) { return Some(Ok(())); }
+    if ask && ok(Command::new("pkexec").args(["systemctl", "start", "ollama"])) { return Some(Ok(())); }
+    Some(Err("Ollama's system service is stopped. Start it with: sudo systemctl start ollama".into()))
+}
+
+/// On launch (Linux): if the Ollama service is installed but a `ollama serve` run as this user is holding its
+/// place (an older Claww started one), stop ours so the service and its models come back. True when it fixed something.
+#[tauri::command]
+fn fix_ollama_service() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if !has_ollama_unit() { return false; }
+        let active = Command::new("systemctl").args(["is-active", "--quiet", "ollama"]).status().map(|s| s.success()).unwrap_or(false);
+        if active { return false; }
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
+        if uid == 0 { return false; }
+        let mine = Command::new("pgrep").args(["-u", &uid.to_string(), "-x", "ollama"]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false);
+        if !mine { return false; }
+        let _ = Command::new("pkill").args(["-u", &uid.to_string(), "-x", "ollama"]).status();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let _ = Command::new("systemctl").args(["start", "--no-ask-password", "ollama"]).status();
+        return true;
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
 fn spawn_ollama_serve(env: &OllamaEnv, clear_unset: bool) -> Result<(), String> {
     let mut c = Command::new("ollama");
     c.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -285,7 +327,10 @@ fn spawn_ollama_serve(env: &OllamaEnv, clear_unset: bool) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn start_ollama(ctx_len: Option<u32>, max_loaded: Option<u32>, keep_alive: Option<String>) -> Result<(), String> {
+fn start_ollama(ctx_len: Option<u32>, max_loaded: Option<u32>, keep_alive: Option<String>, ask: Option<bool>) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if let Some(r) = start_ollama_service(ask.unwrap_or(false)) { return r; }
+    let _ = ask;
     spawn_ollama_serve(&OllamaEnv { ctx: ctx_len.unwrap_or(0), max_loaded: max_loaded.unwrap_or(0), keep_alive: keep_alive.unwrap_or_default() }, false)
 }
 
@@ -304,9 +349,7 @@ fn apply_memory(env: OllamaEnv) -> Result<String, String> {
     let done = || format!("{}. Ollama restarted.", env.label());
     #[cfg(target_os = "linux")]
     {
-        let has_unit = Command::new("systemctl").args(["list-unit-files", "ollama.service", "--no-legend"]).output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("ollama.service")).unwrap_or(false);
-        if !has_unit {
+        if !has_ollama_unit() {
             // No Ollama system service: restart a user-run `ollama serve` with the new settings.
             let _ = Command::new("pkill").args(["-x", "ollama"]).status();
             std::thread::sleep(std::time::Duration::from_millis(900));
@@ -790,7 +833,7 @@ fn main() {
             allow_microphone(_app);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, gpu_info, keep_awake, github_status, github_set, github_api, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
+        .invoke_handler(tauri::generate_handler![paths, ensure_dir, claw_run, stop, http_stream, http_get, http_post, save_file, read_text, read_b64, sys_info, start_ollama, set_ollama_memory, gpu_info, keep_awake, fix_ollama_service, github_status, github_set, github_api, open_url, open_path, ffmpeg_available, video_preview, video_frames, video_poster, whisper_status, whisper_download, transcribe])
         .run(tauri::generate_context!())
         .expect("error while running The Claww");
 }
