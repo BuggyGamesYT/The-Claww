@@ -1649,6 +1649,7 @@ class MainActivity : Activity() {
     // ===================== Built-in Ollama =====================
     private fun startOllama() {
         if (ollama != null) return
+        File(filesDir, "ollama/serve.log").takeIf { it.length() > 2_000_000 }?.delete()
         thread {
             try {
                 val lib = applicationInfo.nativeLibraryDir
@@ -1695,8 +1696,24 @@ class MainActivity : Activity() {
         e["PATH"] = "/system/bin:/system/xbin:" + (e["PATH"] ?: "")
     }
 
+    @Volatile private var ollamaErr: String? = null
+    private var ollamaRestarts = 0
+    /** Last meaningful line of the built-in Ollama's log, for when it stops on its own. */
+    private fun ollamaLogTail(): String? = try {
+        File(filesDir, "ollama/serve.log").readLines().map { it.trim() }.filter { it.isNotEmpty() }
+            .lastOrNull { Regex("error|fatal|panic|signal|denied|cannot|failed|not found", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+            ?.take(160)
+    } catch (_: Exception) { null }
+
     private fun pollStatus() = thread {
         while (alive) {
+            // Built-in Ollama stopped on its own: remember why, restart it (3 tries, then show the reason).
+            val o = ollama
+            if (builtIn && o != null && !o.isAlive) {
+                ollamaErr = ollamaLogTail() ?: "it stopped (exit code ${try { o.exitValue() } catch (_: Exception) { "?" }})"
+                ollama = null
+                if (ollamaRestarts < 3) { ollamaRestarts++; runOnUiThread { startOllama() } }
+            }
             val ok = try {
                 (URL("$host/api/version").openConnection() as HttpURLConnection).run {
                     connectTimeout = 1500; readTimeout = 1500; responseCode == 200
@@ -1708,12 +1725,14 @@ class MainActivity : Activity() {
                 val want = if (model.contains(':')) model else "$model:latest"
                 (0 until a.length()).any { a.getJSONObject(it).getString("name") == want }
             } catch (_: Exception) { false }
+            if (ok) { ollamaRestarts = 0; ollamaErr = null }
             runOnUiThread {
                 statusColor = if (hasModel) good else if (ok) amber else muted
                 statusLine = when {
                     hasModel && builtIn -> "Ready · $model on this device"
                     hasModel -> "Ready · $model via Ollama"
                     ok -> "Ollama running · $model not downloaded"
+                    builtIn && ollamaErr != null && ollamaRestarts >= 3 -> "Ollama couldn't start: ${ollamaErr}"
                     builtIn -> "Starting Ollama…"
                     else -> "Can't reach Ollama"
                 }
@@ -1746,7 +1765,7 @@ class MainActivity : Activity() {
         fun renderModels() {
             modelList.removeAllViews()
             val l = allModels
-            if (l == null) { modelList.addView(TextView(this).apply { text = "Ollama not reachable yet"; setTextColor(muted); textSize = 13f }); return }
+            if (l == null) { modelList.addView(TextView(this).apply { text = if (builtIn && ollamaErr != null) "Ollama isn't running: ${ollamaErr}" else "Ollama not reachable yet"; setTextColor(muted); textSize = 13f }); return }
             val q = modelSearch.text.toString().trim()
             val shown = l.filter { q.isEmpty() || it.contains(q, true) }
             if (shown.isEmpty()) modelList.addView(TextView(this).apply { text = if (l.isEmpty()) "None yet. Download one below." else "No installed model matches \"$q\"."; setTextColor(muted); textSize = 13f })

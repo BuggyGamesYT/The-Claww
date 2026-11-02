@@ -1805,7 +1805,7 @@ const fetchText = url => invoke("http_get", { url, timeoutMs: 20000 });
 const normName = n => { n = n.toLowerCase(); return n.split("/").pop().includes(":") ? n : n + ":latest"; };
 const Catalog = {
   async ollama(q, page, newest) {
-    const html = await fetchText(`https://ollama.com/search?q=${encodeURIComponent(q)}&p=${page + 1}&o=${newest ? "newest" : "popular"}`);
+    const html = await fetchText(`https://ollama.com/search?q=${encodeURIComponent(q.split(":")[0].trim())}&p=${page + 1}&o=${newest ? "newest" : "popular"}`);
     const more = html.includes('data-has-more="true"'), out = [];
     html.split('<a href="/library/').slice(1).forEach(block => {
       const name = block.slice(0, block.indexOf('"'));
@@ -1823,7 +1823,7 @@ const Catalog = {
   },
   async hf(q, page, newest) {
     const per = 30;
-    const a = JSON.parse(await fetchText(`https://huggingface.co/api/models?search=${encodeURIComponent(q)}&filter=gguf&sort=${newest ? "trendingScore" : "likes"}&direction=-1&limit=${per * (page + 1)}`));
+    const a = JSON.parse(await fetchText(`https://huggingface.co/api/models?search=${encodeURIComponent(q.split(":")[0].trim())}&filter=gguf&sort=${newest ? "trendingScore" : "likes"}&direction=-1&limit=${per * (page + 1)}`));
     const out = a.slice(page * per).map(o => {
       const tags = o.tags || [];
       const caps = []; if (o.pipeline_tag === "image-text-to-text" || tags.includes("vision")) caps.push("vision");

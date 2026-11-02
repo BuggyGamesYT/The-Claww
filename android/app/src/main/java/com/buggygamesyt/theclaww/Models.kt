@@ -49,7 +49,8 @@ object Catalog {
     private fun unescape(s: String) = s.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").trim()
 
     /** Ollama library search (empty query = most popular). Cloud-only models are skipped: they can't be downloaded. */
-    fun ollama(q: String, page: Int, newest: Boolean = true): Pair<List<CatalogEntry>, Boolean> {
+    fun ollama(q0: String, page: Int, newest: Boolean = true): Pair<List<CatalogEntry>, Boolean> {
+        val q = q0.substringBefore(':').trim() // "llama3.2:1b" → search "llama3.2"; the size is picked on the model's card
         val html = get("https://ollama.com/search?q=${enc(q)}&p=${page + 1}" + if (newest) "&o=newest" else "&o=popular")
         val more = html.contains("data-has-more=\"true\"")
         val out = mutableListOf<CatalogEntry>()
@@ -73,7 +74,8 @@ object Catalog {
 
     /** Hugging Face: every public GGUF model (runs in Ollama), most downloaded first. */
     /** newest = trending GGUF uploads ordered by release date (pure "createdAt" is mostly 0-download noise). */
-    fun hf(q: String, page: Int, newest: Boolean = true): Pair<List<CatalogEntry>, Boolean> {
+    fun hf(q0: String, page: Int, newest: Boolean = true): Pair<List<CatalogEntry>, Boolean> {
+        val q = q0.substringBefore(':').trim()
         val per = 30
         val json = JSONArray(get("https://huggingface.co/api/models?search=${enc(q)}&filter=gguf&sort=${if (newest) "trendingScore" else "likes"}&direction=-1&limit=${per * (page + 1)}"))
         val out = mutableListOf<CatalogEntry>()
